@@ -19,15 +19,12 @@ import os
 import sys
 import unittest
 
-print(sys.path)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
-from host_controller.build import build_flasher
-
 try:
     from unittest import mock
 except ImportError:
     import mock
+
+from host_controller.build import build_flasher
 
 
 class BuildFlasherTest(unittest.TestCase):
@@ -89,25 +86,27 @@ class BuildFlasherTest(unittest.TestCase):
         mock_device.isBootloaderMode = False
         device_images = {"img": "my/image/path"}
         flasher.FlashUsingCustomBinary(device_images, "reboottowhatever",
-                                       "myarg")
+                                       ["myarg"])
         mock_device.adb.reboot.assert_called_with("reboottowhatever")
-        mock_device.customflasher.myarg.assert_called_with("my/image/path")
+        mock_device.customflasher.ExecCustomFlasherCmd.assert_called_with(
+            "myarg", "my/image/path")
 
         mock_device.reset_mock()
         mock_device.isBootloaderMode = True
         device_images["img"] = "my/other/image/path"
         flasher.FlashUsingCustomBinary(device_images, "reboottowhatever",
-                                       "myarg")
+                                       ["myarg"])
         mock_device.adb.reboot.assert_not_called()
-        mock_device.customflasher.myarg.assert_called_with(
-            "my/other/image/path")
+        mock_device.customflasher.ExecCustomFlasherCmd.assert_called_with(
+            "myarg", "my/other/image/path")
 
-    @mock.patch(
-        "host_controller.build.build_flasher.android_device")
+    @mock.patch("host_controller.build.build_flasher.android_device")
     @mock.patch("host_controller.build.build_flasher.logging")
     @mock.patch("host_controller.build.build_flasher.cmd_utils")
     @mock.patch("host_controller.build.build_flasher.os")
-    def testRepackageArtifacts(self, mock_os, mock_cmd_utils,
+    @mock.patch("host_controller.build.build_flasher.open",
+                new_callable=mock.mock_open)
+    def testRepackageArtifacts(self, mock_open, mock_os, mock_cmd_utils,
                                mock_logger, mock_class):
         """Test for RepackageArtifacts().
 

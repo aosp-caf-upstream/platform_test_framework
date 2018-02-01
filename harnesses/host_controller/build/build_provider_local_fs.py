@@ -14,9 +14,6 @@
 # limitations under the License.
 #
 
-import os
-import zipfile
-
 from host_controller.build import build_provider
 
 
@@ -27,31 +24,17 @@ class BuildProviderLocalFS(build_provider.BuildProvider):
         super(BuildProviderLocalFS, self).__init__()
 
     def Fetch(self, path):
-        """Fetches Android device artifact file(s) from a local directory.
+        """Fetches Android device artifact file(s) from a local path.
 
         Args:
-            path: string, the path of a directory which keeps artifacts.
+            path: string, the path of the artifacts.
 
         Returns:
             a dict containing the device image info.
             a dict containing the test suite package info.
         """
-        if os.path.isdir(path):
-            self.SetDeviceImagesInDirecotry(path)
+        if path.endswith(".tar.md5"):
+            self.SetDeviceImage("img", path)
         else:
-            if path.endswith("android-vts.zip"):
-                if os.path.isfile(path):
-                    dest_path = os.path.join(self.tmp_dirpath, "android-vts")
-                    with zipfile.ZipFile(path, 'r') as zip_ref:
-                        zip_ref.extractall(dest_path)
-                        bin_path = os.path.join(dest_path, "android-vts",
-                                                "tools", "vts-tradefed")
-                        os.chmod(bin_path, 0766)
-                        self.SetTestSuitePackage("vts", bin_path)
-                else:
-                    print("The specified file doesn't exist, %s" % path)
-            elif path.endswith(".tar.md5"):
-                self.SetDeviceImage("img", path)
-            else:
-                print("unsupported zip file %s" % path)
+            self.SetFetchedFile(path)
         return self.GetDeviceImage(), self.GetTestSuitePackage()

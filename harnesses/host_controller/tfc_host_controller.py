@@ -20,7 +20,7 @@ import time
 import uuid
 
 import httplib2
-from apiclient import errors
+from googleapiclient import errors
 
 from host_controller import invocation_thread
 from host_controller.tradefed import remote_operation

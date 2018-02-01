@@ -33,6 +33,10 @@ class BuildProvider(object):
         _BASIC_IMAGE_FILE_NAMES: a list of strings which are the image names in
                                  an artifact zip.
         _CONFIG_FILE_EXTENSION: string, the config file extension.
+        _additional_files: a dict containing additionally fetched files that
+                           custom features may need. The key is the path
+                           relative to temporary directory and the value is the
+                           full path.
         _configs: dict where the key is config type and value is the config file
                   path.
         _device_images: dict where the key is image file name and value is the
@@ -46,6 +50,7 @@ class BuildProvider(object):
     _BASIC_IMAGE_FILE_NAMES = ["boot.img", "system.img", "vendor.img"]
 
     def __init__(self):
+        self._additional_files = {}
         self._device_images = {}
         self._test_suites = {}
         self._configs = {}
@@ -90,17 +95,6 @@ class BuildProvider(object):
         return any(file_path.endswith(ext)
                    for ext in self._IMAGE_FILE_EXTENSIONS)
 
-    def SetDeviceImagesInDirecotry(self, root_dir):
-        """Sets device images to *.img and *.bin in a directory.
-
-        Args:
-            root_dir: string, the directory to find images in.
-        """
-        for dir_name, file_name in utils.iterate_files(root_dir):
-            if self._IsImageFile(file_name):
-                self.SetDeviceImage(file_name,
-                                    os.path.join(dir_name, file_name))
-
     def SetDeviceImageZip(self, path):
         """Sets device image(s) using files in a given zip file.
 
@@ -116,7 +110,7 @@ class BuildProvider(object):
                 self.SetDeviceImage(FULL_ZIPFILE, path)
             else:
                 zip_ref.extractall(dest_path)
-                self.SetDeviceImagesInDirecotry(dest_path)
+                self.SetFetchedDirectory(dest_path)
 
     def GetDeviceImage(self, name=None):
         """Returns device image info."""
@@ -160,7 +154,8 @@ class BuildProvider(object):
             path: string, the path of a config file.
         """
         if path.endswith(self._CONFIG_FILE_EXTENSION):
-            dest_path = os.path.join(self.tmp_dirpath, os.path.basename(path))
+            dest_path = os.path.join(
+                self.tmp_dirpath, os.path.basename(path) + ".dir")
             with zipfile.ZipFile(path, 'r') as zip_ref:
                 zip_ref.extractall(dest_path)
                 path = dest_path
@@ -173,6 +168,63 @@ class BuildProvider(object):
         if config_type is None:
             return self._configs
         return self._configs[config_type]
+
+    def SetAdditionalFile(self, rel_path, full_path):
+        """Sets the key and value of additionally fetched files.
+
+        Args:
+            rel_path: the file path relative to temporary directory.
+            abs_path: the file path that this process can access.
+        """
+        self._additional_files[rel_path] = full_path
+
+    def GetAdditionalFile(self, rel_path=None):
+        """Returns the paths to fetched files."""
+        if rel_path is None:
+            return self._additional_files
+        return self._additional_files[rel_path]
+
+    def SetFetchedDirectory(self, dir_path, root_path=None):
+        """Adds every file in a directory to one of the dictionaries.
+
+        This method follows symlink to file, but skips symlink to directory.
+
+        Args:
+            dir_path: string, the directory to find files in.
+            root_path: string, the temporary directory that dir_path is in.
+                       The default value is dir_path.
+        """
+        for dir_name, file_name in utils.iterate_files(dir_path):
+            full_path = os.path.join(dir_name, file_name)
+            self.SetFetchedFile(full_path,
+                                (root_path if root_path else dir_path))
+
+    def SetFetchedFile(self, file_path, root_dir=None):
+        """Adds a file to one of the dictionaries.
+
+        Args:
+            file_path: string, the path to the file.
+            root_dir: string, the temporary directory that file_path is in.
+                      The default value is file_path if file_path is a
+                      directory. Otherwise, the default value is file_path's
+                      parent directory.
+        """
+        file_name = os.path.basename(file_path)
+        if os.path.isdir(file_path):
+            self.SetFetchedDirectory(file_path, root_dir)
+        elif self._IsImageFile(file_path):
+            self.SetDeviceImage(file_name, file_path)
+        elif file_name == "android-vts.zip":
+            self.SetTestSuitePackage("vts", file_path)
+        elif file_name.startswith("vti-global-config"):
+            self.SetConfigPackage(
+                "prod" if "prod" in file_name else "test", file_path)
+        elif file_path.endswith(".zip"):
+            self.SetDeviceImageZip(file_path)
+        else:
+            rel_path = (os.path.relpath(file_path, root_dir) if root_dir else
+                        os.path.basename(file_path))
+            self.SetAdditionalFile(rel_path, file_path)
 
     def PrintDeviceImageInfo(self):
         """Prints device image info."""

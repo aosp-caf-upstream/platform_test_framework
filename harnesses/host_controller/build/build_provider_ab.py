@@ -15,7 +15,6 @@
 #
 
 import os
-import zipfile
 
 from host_controller.build import build_provider
 from vts.utils.python.build.api import artifact_fetcher
@@ -83,9 +82,6 @@ class BuildProviderAB(build_provider.BuildProvider):
             branch, target, build_id, artifact_name,
             dest_filepath=dest_filepath)
 
-        if dest_filepath.endswith("android-vts.zip"):
-            self.SetTestSuitePackage("vts", dest_filepath)
-        elif dest_filepath.endswith(".zip"):
-            self.SetDeviceImageZip(dest_filepath)
+        self.SetFetchedFile(dest_filepath)
 
         return self.GetDeviceImage(), self.GetTestSuitePackage(), fetch_info

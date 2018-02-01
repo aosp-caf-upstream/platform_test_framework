@@ -17,6 +17,7 @@
 import cmd
 import datetime
 import imp  # Python v2 compatibility
+import importlib
 import logging
 import multiprocessing
 import os
@@ -25,10 +26,12 @@ import socket
 import subprocess
 import sys
 import threading
+import tempfile
 import time
+import zipfile
 
 import httplib2
-from apiclient import errors
+from googleapiclient import errors
 import urlparse
 
 from google.protobuf import text_format
@@ -36,9 +39,10 @@ from google.protobuf import text_format
 from vti.test_serving.proto import TestLabConfigMessage_pb2 as LabCfgMsg
 from vti.test_serving.proto import TestScheduleConfigMessage_pb2 as SchedCfgMsg
 
-from host_controller.acloud import acloud_client
 from host_controller.console_argument_parser import ConsoleArgumentError
 from host_controller.console_argument_parser import ConsoleArgumentParser
+from host_controller.command_processor import command_info
+from host_controller.command_processor import command_test
 from host_controller.tfc import request
 from host_controller.build import build_flasher
 from host_controller.build import build_provider
@@ -57,8 +61,10 @@ _DEFAULT_ACCOUNT_ID = '543365459'
 # The default value for "flash --current".
 _DEFAULT_FLASH_IMAGES = [
     build_provider.FULL_ZIPFILE,
+    "bootloader.img",
     "boot.img",
     "cache.img",
+    "radio.img",
     "system.img",
     "userdata.img",
     "vbmeta.img",
@@ -79,12 +85,22 @@ DEVICE_STATUS_DICT = {
 _SPL_DEFAULT_DAY = 5
 
 
+COMMAND_PROCESSORS = [
+    command_info.CommandInfo,
+    command_test.CommandTest,
+]
+
+
 class Console(cmd.Cmd):
     """The console for host controllers.
 
     Attributes:
+        command_processors: dict of string:BaseCommandProcessor,
+                            map between command string and command processors.
         device_image_info: dict containing info about device image files.
         prompt: The prompt string at the beginning of each command line.
+        test_results: dict where the key is the name of the test suite and the
+                      value is the path to the result.
         test_suite_info: dict containing info about test suite package files.
         tools_info: dict containing info about custom tool files.
         build_thread: dict containing threading.Thread instances(s) that
@@ -106,7 +122,6 @@ class Console(cmd.Cmd):
         _fetch_parser: The parser for fetch command.
         _flash_parser: The parser for flash command.
         _gsispl_parser: The parser for gsispl command.
-        _info_parser: The parser for info command.
         _lease_parser: The parser for lease command.
         _list_parser: The parser for list command.
         _request_parser: The parser for request command.
@@ -135,7 +150,9 @@ class Console(cmd.Cmd):
         self._in_file = in_file
         self._out_file = out_file
         self.prompt = "> "
+        self.command_processors = {}
         self.device_image_info = {}
+        self.test_results = {}
         self.test_suite_info = {}
         self.tools_info = {}
         self.build_thread = {}
@@ -143,7 +160,13 @@ class Console(cmd.Cmd):
         self.update_thread = None
         self.fetch_info = {}
 
+        if _ANDROID_SERIAL in os.environ:
+            self._serials = [os.environ[_ANDROID_SERIAL]]
+        else:
+            self._serials = []
+
         self.InitCommandModuleParsers()
+        self.SetUpCommandProcessors()
 
     def InitCommandModuleParsers(self):
         """Init all console command modules"""
@@ -153,51 +176,22 @@ class Console(cmd.Cmd):
                 if hasattr(attr_func, '__call__'):
                     attr_func()
 
-    def _InitAcloudParser(self):
-        """Initializes the parser for acloud command."""
-        self._acloud_parser = ConsoleArgumentParser("acloud",
-                                                   "Start acloud instances.")
-        self._acloud_parser.add_argument(
-            "--build_id",
-            help="Build ID to use.")
-        self._acloud_parser.add_argument(
-            "--provider",
-            default="ab",
-            choices=("local_fs", "gcs", "pab", "ab"),
-            help="Build provider type")
-        self._acloud_parser.add_argument(
-            "--branch",  # not required for local_fs
-            help="Branch to grab the artifact from.")
-        self._acloud_parser.add_argument(
-            "--target",  # not required for local_fs
-            help="Target product to grab the artifact from.")
-        self._acloud_parser.add_argument(
-            "--config_path",
-            required=True,
-            help="Acloud config path.")
+    def SetUpCommandProcessors(self):
+        """Sets up all command processors."""
+        for command_processor in COMMAND_PROCESSORS:
+            cp = command_processor()
+            cp._SetUp(self)
+            do_text = "do_%s" % cp.command
+            help_text = "help_%s" % cp.command
+            setattr(self, do_text, cp._Run)
+            setattr(self, help_text, cp._Help)
+            self.command_processors[cp.command] = cp
 
-    def do_acloud(self, line):
-        """Creates an acloud instance and connects to it via adb."""
-        args = self._acloud_parser.ParseLine(line)
-
-        if args.provider == "ab":
-            if args.build_id.lower() == "latest":
-                build_id = self._build_provider["ab"].GetLatestBuildId(
-                    args.branch,
-                    args.target)
-        else:
-            # TODO(yuexima): support more provider types.
-            logging.error("Provider %s not supported yet." % args.provider)
-            return
-
-        ac = acloud_client.ACloudClient()
-        ac.PrepareConfig(args.config_path)
-        ac.CreateInstance(args.build_id)
-        ac.ConnectInstanceToAdb(ah.GetInstanceIP())
-
-    def help_acloud(self):
-        """Prints help message for acloud command."""
-        self._acloud_parser.print_help(self._out_file)
+    def TearDown(self):
+        """Removes all command processors."""
+        for command_processor in self.command_processors.itervalues():
+            command_processor._TearDown()
+        self.command_processors.clear()
 
     def _InitRequestParser(self):
         """Initializes the parser for request command."""
@@ -241,14 +235,6 @@ class Console(cmd.Cmd):
             return False
 
         script_module = imp.load_source('script_module', script_file_path)
-
-        if _ANDROID_SERIAL in os.environ:
-            serial = os.environ[_ANDROID_SERIAL]
-        else:
-            serial = None
-
-        if serial:
-            self.onecmd("device --set_serial=%s" % serial)
 
         commands = script_module.EmitConsoleCommands()
         if commands:
@@ -444,44 +430,49 @@ class Console(cmd.Cmd):
             help=
             "Name of the artifact to be fetched. {id} replaced with build id.")
         self._fetch_parser.add_argument(
-            "--userinfo_file",
+            "--userinfo-file",
             help=
             "Location of file containing email and password, if using POST.")
         self._fetch_parser.add_argument(
-            "--tool", help="The path of custom tool to be fetched from GCS.")
+            "--noauth_local_webserver",
+            default=False,
+            type=bool,
+            help="True to not use a local webserver for authentication.")
 
     def do_fetch(self, line):
         """Makes the host download a build artifact from PAB."""
         args = self._fetch_parser.ParseLine(line)
+
+        if args.type not in self._build_provider:
+            print("ERROR: uninitialized fetch type %s" % args.type)
+            return
+
+        provider = self._build_provider[args.type]
         if args.type == "pab":
             # do we want this somewhere else? No harm in doing multiple times
-            self._build_provider[args.type].Authenticate(args.userinfo_file)
+            provider.Authenticate(args.userinfo_file,
+                                  args.noauth_local_webserver)
             (device_images, test_suites,
-             fetch_environment, _) = self._build_provider[
-                args.type].GetArtifact(
-                    account_id=args.account_id,
-                    branch=args.branch,
-                    target=args.target,
-                    artifact_name=args.artifact_name,
-                    build_id=args.build_id,
-                    method=args.method)
+             fetch_environment, _) = provider.GetArtifact(
+                account_id=args.account_id,
+                branch=args.branch,
+                target=args.target,
+                artifact_name=args.artifact_name,
+                build_id=args.build_id,
+                method=args.method)
             self.fetch_info["build_id"] = fetch_environment["build_id"]
         elif args.type == "local_fs":
-            device_images, test_suites = self._build_provider[args.type].Fetch(
-                args.path)
+            device_images, test_suites = provider.Fetch(args.path)
             self.fetch_info["build_id"] = None
         elif args.type == "gcs":
-            device_images, test_suites, tools = self._build_provider[
-                args.type].Fetch(args.path, args.tool)
-            self.tools_info.update(tools)
+            device_images, test_suites, tools = provider.Fetch(args.path)
             self.fetch_info["build_id"] = None
         elif args.type == "ab":
-            device_images, test_suites, fetch_environment = self._build_provider[
-                args.type].Fetch(
-                    branch=args.branch,
-                    target=args.target,
-                    artifact_name=args.artifact_name,
-                    build_id=args.build_id)
+            device_images, test_suites, fetch_environment = provider.Fetch(
+                branch=args.branch,
+                target=args.target,
+                artifact_name=args.artifact_name,
+                build_id=args.build_id)
             self.fetch_info["build_id"] = fetch_environment["build_id"]
         else:
             print("ERROR: unknown fetch type %s" % args.type)
@@ -492,6 +483,7 @@ class Console(cmd.Cmd):
 
         self.device_image_info.update(device_images)
         self.test_suite_info.update(test_suites)
+        self.tools_info.update(provider.GetAdditionalFile())
 
         if self.device_image_info:
             logging.info("device images:\n%s", "\n".join(
@@ -501,6 +493,10 @@ class Console(cmd.Cmd):
             logging.info("test suites:\n%s", "\n".join(
                 suite + ": " + path
                 for suite, path in self.test_suite_info.iteritems()))
+        if self.tools_info:
+            logging.info("additional files:\n%s", "\n".join(
+                rel_path + ": " + full_path
+                for rel_path, full_path in self.tools_info.iteritems()))
 
     def help_fetch(self):
         """Prints help message for fetch command."""
@@ -583,19 +579,27 @@ class Console(cmd.Cmd):
         self._flash_parser.add_argument(
             "--flasher_type",
             default="fastboot",
-            choices=("fastboot", "custom"),
-            help="Flasher binary type")
+            help="Flasher type. Valid arguments are \"fastboot\", \"custom\", "
+            "and full module name followed by class name. The class must "
+            "inherit build_flasher.BuildFlasher, and implement "
+            "__init__(serial, flasher_path) and "
+            "Flash(device_images, additional_files, *flasher_args).")
         self._flash_parser.add_argument(
             "--flasher_path",
             default=None,
             help="Path to a flasher binary")
         self._flash_parser.add_argument(
+            "flasher_args",
+            metavar="ARGUMENTS",
+            nargs="*",
+            help="The arguments passed to the flasher binary. If any argument "
+            "starts with \"-\", place all of them after \"--\" at end of "
+            "line.")
+        self._flash_parser.add_argument(
             "--reboot_mode",
             default="bootloader",
             choices=("bootloader", "download"),
             help="Reboot device to bootloader/download mode")
-        self._flash_parser.add_argument(
-            "--arg_flasher", help="Argument passed to the custom binary")
         self._flash_parser.add_argument(
             "--repackage",
             default="tar.md5",
@@ -606,26 +610,24 @@ class Console(cmd.Cmd):
         """Flash GSI or build images to a device connected with ADB."""
         args = self._flash_parser.ParseLine(line)
 
-        if args.flasher_path:
-            flasher_path = args.flasher_path
-        elif (self.tools_info is not None and
-              args.flasher_path in self.tools_info):
+        # path
+        if (self.tools_info is not None and
+                args.flasher_path in self.tools_info):
             flasher_path = self.tools_info[args.flasher_path]
+        elif args.flasher_path:
+            flasher_path = args.flasher_path
         else:
             flasher_path = ""
 
-        flashers = []
+        # serial numbers
         if args.serial:
-            flasher = build_flasher.BuildFlasher(args.serial, flasher_path)
-            flashers.append(flasher)
+            flasher_serials = [args.serial]
         elif self._serials:
-            for serial in self._serials:
-                flasher = build_flasher.BuildFlasher(serial, flasher_path)
-                flashers.append(flasher)
+            flasher_serials = self._serials
         else:
-            flasher = build_flasher.BuildFlasher("", flasher_path)
-            flashers.append(flasher)
+            flasher_serials = [""]
 
+        # images
         if args.current:
             partition_image = dict((partition, self.device_image_info[image])
                                    for partition, image in args.current)
@@ -635,40 +637,50 @@ class Console(cmd.Cmd):
                                    for image in _DEFAULT_FLASH_IMAGES
                                    if image in self.device_image_info)
 
-        if flashers:
-            # Can be parallelized as long as that's proven reliable.
-            for flasher in flashers:
+        # type
+        if args.flasher_type in ("fastboot", "custom"):
+            flasher_class = build_flasher.BuildFlasher
+        else:
+            class_path = args.flasher_type.rsplit(".", 1)
+            flasher_module = importlib.import_module(class_path[0])
+            flasher_class = getattr(flasher_module, class_path[1])
+            if not issubclass(flasher_class, build_flasher.BuildFlasher):
+                raise TypeError("%s is not a subclass of BuildFlasher." %
+                                class_path[1])
+
+        flashers = [flasher_class(s, flasher_path) for s in flasher_serials]
+
+        # Can be parallelized as long as that's proven reliable.
+        for flasher in flashers:
+            if args.flasher_type == "fastboot":
                 if args.current is not None:
                     flasher.Flash(partition_image)
                 else:
-                    if args.flasher_type is None or args.flasher_type == "fastboot":
-                        if args.gsi is None and args.build_dir is None:
-                            self._flash_parser.error(
-                                "Nothing requested: specify --gsi or --build_dir"
-                            )
-                        if args.build_dir is not None:
-                            flasher.Flashall(args.build_dir)
-                        if args.gsi is not None:
-                            flasher.FlashGSI(args.gsi, args.vbmeta)
-                    elif args.flasher_type == "custom":
-                        if flasher_path is not None:
-                            if args.repackage is not None:
-                                flasher.RepackageArtifacts(
-                                    self.device_image_info, args.repackage)
-                            flasher.FlashUsingCustomBinary(
-                                self.device_image_info, args.reboot_mode,
-                                args.arg_flasher, 300)
-                        else:
-                            self._flash_parser.error(
-                                "Please specify the path to custom flash tool."
-                            )
-                    else:
+                    if args.gsi is None and args.build_dir is None:
                         self._flash_parser.error(
-                            "Wrong flasher type requested: --flasher_type=%s" %
-                            args.flasher_type)
+                            "Nothing requested: "
+                            "specify --gsi or --build_dir")
+                    if args.build_dir is not None:
+                        flasher.Flashall(args.build_dir)
+                    if args.gsi is not None:
+                        flasher.FlashGSI(args.gsi, args.vbmeta)
+            elif args.flasher_type == "custom":
+                if flasher_path is not None:
+                    if args.repackage is not None:
+                        flasher.RepackageArtifacts(
+                            self.device_image_info, args.repackage)
+                    flasher.FlashUsingCustomBinary(
+                        self.device_image_info, args.reboot_mode,
+                        args.flasher_args, 300)
+                else:
+                    self._flash_parser.error(
+                        "Please specify the path to custom flash tool.")
+            else:
+                flasher.Flash(
+                    partition_image, self.tools_info, *args.flasher_args)
 
-            for flasher in flashers:
-                flasher.WaitForDevice()
+        for flasher in flashers:
+            flasher.WaitForDevice()
 
     def help_flash(self):
         """Prints help message for flash command."""
@@ -709,19 +721,40 @@ class Console(cmd.Cmd):
             "--account_id",
             default=_DEFAULT_ACCOUNT_ID,
             help="Partner Android Build account_id to use.")
+        self._build_parser.add_argument(
+            "--method",
+            default="GET",
+            choices=("GET", "POST"),
+            help="Method for getting build information")
+        self._build_parser.add_argument(
+            "--userinfo-file",
+            help=
+            "Location of file containing email and password, if using POST.")
+        self._build_parser.add_argument(
+            "--noauth_local_webserver",
+            default=False,
+            type=bool,
+            help="True to not use a local webserver for authentication.")
 
-    def UpdateBuild(self, account_id, branch, targets, artifact_type):
+    def UpdateBuild(self, account_id, branch, targets, artifact_type, method,
+                    userinfo_file, noauth_local_webserver):
         """Updates the build state.
 
         Args:
             account_id: string, Partner Android Build account_id to use.
             branch: string, branch to grab the artifact from.
             targets: string, a comma-separate list of build target product(s).
-            artifact_type: string, artifcat type (`device`, 'gsi' or `test').
+            artifact_type: string, artifact type (`device`, 'gsi' or `test').
+            method: string,  method for getting build information.
+            userinfo_file: string, the path of a file containing email and
+                           password (if method == POST).
+            noauth_local_webserver: boolean, True to not use a local websever.
         """
         builds = []
 
-        self._build_provider["pab"].Authenticate()
+        self._build_provider["pab"].Authenticate(
+            userinfo_file=userinfo_file,
+            noauth_local_webserver=noauth_local_webserver)
         for target in targets.split(","):
             listed_builds = self._build_provider[
                 "pab"].GetBuildList(
@@ -730,15 +763,32 @@ class Console(cmd.Cmd):
                     target=target,
                     page_token="",
                     max_results=100,
-                    method="GET")
+                    method=method)
 
             for listed_build in listed_builds:
-                if listed_build["successful"]:
+                if method == "GET":
+                    if "successful" in listed_build:
+                        if listed_build["successful"]:
+                            build = {}
+                            build["manifest_branch"] = branch
+                            build["build_id"] = listed_build["build_id"]
+                            if "-" in target:
+                                build["build_target"], build["build_type"] = target.split("-")
+                            else:
+                                build["build_target"] = target
+                                build["build_type"] = ""
+                            build["artifact_type"] = artifact_type
+                            build["artifacts"] = []
+                            builds.append(build)
+                    else:
+                        print("Error: listed_build %s" % listed_build)
+                else:  # POST
                     build = {}
                     build["manifest_branch"] = branch
-                    build["build_id"] = listed_build["build_id"]
+                    build["build_id"] = listed_build[u"1"]
                     if "-" in target:
-                        build["build_target"], build["build_type"] = target.split("-")
+                        (build["build_target"],
+                         build["build_type"]) = target.split("-")
                     else:
                         build["build_target"] = target
                         build["build_type"] = ""
@@ -747,8 +797,8 @@ class Console(cmd.Cmd):
                     builds.append(build)
         self._vti_endpoint_client.UploadBuildInfo(builds)
 
-    def UpdateBuildLoop(self, account_id, branch, target, artifact_type,
-                        update_interval):
+    def UpdateBuildLoop(self, account_id, branch, target, artifact_type, method,
+                        userinfo_file, noauth_local_webserver, update_interval):
         """Regularly updates the build information.
 
         Args:
@@ -756,12 +806,18 @@ class Console(cmd.Cmd):
             branch: string, branch to grab the artifact from.
             targets: string, a comma-separate list of build target product(s).
             artifact_type: string, artifcat type (`device`, 'gsi' or `test).
+            method: string,  method for getting build information.
+            userinfo_file: string, the path of a file containing email and
+                           password (if method == POST).
+            noauth_local_webserver: boolean, True to not use a local websever.
             update_interval: int, number of seconds before repeating
         """
         thread = threading.currentThread()
         while getattr(thread, 'keep_running', True):
             try:
-                self.UpdateBuild(account_id, branch, target, artifact_type)
+                self.UpdateBuild(account_id, branch, target,
+                                 artifact_type, method, userinfo_file,
+                                 noauth_local_webserver)
             except (socket.error, remote_operation.RemoteOperationException,
                     httplib2.HttpLib2Error, errors.HttpError) as e:
                 logging.exception(e)
@@ -775,7 +831,10 @@ class Console(cmd.Cmd):
                 args.account_id,
                 args.branch,
                 args.target,
-                args.artifact_type)
+                args.artifact_type,
+                args.method,
+                args.userinfo_file,
+                args.noauth_local_webserver)
         elif args.update == "list":
             print("Running build update sessions:")
             for id in self.build_thread:
@@ -807,6 +866,9 @@ class Console(cmd.Cmd):
                     args.branch,
                     args.target,
                     args.artifact_type,
+                    args.method,
+                    args.userinfo_file,
+                    args.noauth_local_webserver,
                     args.interval, ))
             self.build_thread[args.id].daemon = True
             self.build_thread[args.id].start()
@@ -902,7 +964,7 @@ class Console(cmd.Cmd):
                     for root, dirs, files in os.walk(base_path):
                         for config_file in files:
                             full_path = os.path.join(root, config_file)
-                            if file.endswith(".schedule_config"):
+                            if config_file.endswith(".schedule_config"):
                                 with open(full_path, "r") as fd:
                                   context = fd.read()
                                   sched_cfg_msg = SchedCfgMsg.ScheduleConfigMessage()
@@ -1043,7 +1105,22 @@ class Console(cmd.Cmd):
             default=False,
             type=bool,
             help="Whether to lease jobs and execute them.")
-        self._serials = []
+
+    def SetSerials(self, serials):
+        """Sets the default serial numbers for flashing and testing.
+
+        Args:
+            serials: A list of strings, the serial numbers.
+        """
+        self._serials = serials
+
+    def GetSerials(self):
+        """Returns the serial numbers saved in the console.
+
+        Returns:
+            A list of strings, the serial numbers.
+        """
+        return self._serials
 
     def UpdateDevice(self, server_type, host, lease):
         """Updates the device state of all devices on a given host.
@@ -1080,7 +1157,13 @@ class Console(cmd.Cmd):
                 if len(line.strip()):
                     device = {}
                     device["serial"] = line.split()[0]
-                    device["product"] = "unknown"
+                    _, stderr, retcode = cmd_utils.ExecuteOneShellCommand(
+                        "fastboot -s %s getvar product" % device["serial"])
+                    if retcode == 0:
+                        res = stderr.splitlines()[0].rstrip()
+                        device["product"] = res.split(":")[1].strip()
+                    else:
+                        device["product"] = "error"
                     device["status"] = DEVICE_STATUS_DICT["fastboot"]
                     devices.append(device)
 
@@ -1091,9 +1174,14 @@ class Console(cmd.Cmd):
                 filepath, kwargs = self._vti_endpoint_client.LeaseJob(
                     socket.gethostname())
                 if filepath:
-                    self.ProcessConfigurableScript(
-                        os.path.join("host_controller", "campaigns", filepath),
+                    ret = self.ProcessConfigurableScript(
+                        os.path.join(os.getcwd(), "host_controller", "campaigns",
+                                     filepath),
                         **kwargs)
+                    if ret:
+                        self._vti_endpoint_client.StopHeartbeat("COMPLETE")
+                    else:
+                        self._vti_endpoint_client.StopHeartbeat("INFRA_ERROR")
         elif server_type == "tfc":
             devices = host.ListDevices()
             for device in devices:
@@ -1126,7 +1214,7 @@ class Console(cmd.Cmd):
         """Sets device info such as serial number."""
         args = self._device_parser.ParseLine(line)
         if args.set_serial:
-            self._serials = args.set_serial.split(",")
+            self.SetSerials(args.set_serial.split(","))
             print("serials: %s" % self._serials)
         if args.update:
             if args.host is None:
@@ -1212,6 +1300,16 @@ class Console(cmd.Cmd):
                 img_path = args.version_from_path
             elif args.version_from_path in self.device_image_info:
                 img_path = self.device_image_info[args.version_from_path]
+            elif (args.version_from_path == "boot.img" and
+                  "full-zipfile" in self.device_image_info):
+                tempdir_base = os.path.join(os.getcwd(), "tmp")
+                if not os.path.exists(tempdir_base):
+                    os.mkdir(tempdir_base)
+                dest_path = tempfile.mkdtemp(dir=tempdir_base)
+
+                with zipfile.ZipFile(self.device_image_info["full-zipfile"], 'r') as zip_ref:
+                    zip_ref.extractall(dest_path)
+                    img_path = os.path.join(dest_path, "boot.img")
             else:
                 print("Cannot find %s file." % args.version_from_path)
                 return
@@ -1248,73 +1346,6 @@ class Console(cmd.Cmd):
         """Prints help message for gsispl command."""
         self._gsisplParser.print_help(self._out_file)
 
-    def _InitTestParser(self):
-        """Initializes the parser for test command."""
-        self._test_parser = ConsoleArgumentParser("test",
-                                                  "Executes a command on TF.")
-        self._test_parser.add_argument(
-            "--serial",
-            default=None,
-            help=("The target device serial to run the command. "
-                  "A comma-separate list."))
-        self._test_parser.add_argument(
-            "--test_exec_mode",
-            default="subprocess",
-            help="The target exec model.")
-        self._test_parser.add_argument(
-            "command",
-            metavar="COMMAND",
-            nargs="+",
-            help='The command to be executed. If the command contains '
-            'arguments starting with "-", place the command after '
-            '"--" at end of line. format: plan -m module -t testcase')
-
-    def do_test(self, line):
-        """Executes a command using a VTS-TF instance."""
-        args = self._test_parser.ParseLine(line)
-        if args.serial:
-            serials = args.serial.split(",")
-        elif self._serials:
-            serials = self._serials
-        else:
-            serials = []
-
-        if args.test_exec_mode == "subprocess":
-            if "vts" not in self.test_suite_info:
-                 print("test_suite_info doesn't have 'vts': %s" %
-                       self.test_suite_info)
-            else:
-                bin_path = self.test_suite_info["vts"]
-                cmd = [bin_path, "run"]
-                cmd.extend(str(c) for c in args.command)
-                if serials:
-                    for serial in serials:
-                        cmd.extend(["-s", str(serial)])
-                print("Command: %s" % cmd)
-                result = subprocess.check_output(cmd)
-                logging.debug("result: %s", result)
-        else:
-            print("unsupported exec mode: %s", args.test_exec_mode)
-
-    def help_test(self):
-        """Prints help message for test command."""
-        self._test_parser.print_help(self._out_file)
-
-    def _InitInfoParser(self):
-        """Initializes the parser for info command."""
-        self._info_parser = ConsoleArgumentParser("info",
-                                                  "Show status.")
-
-    def do_info(self, line):
-        """Shows the console's session status information."""
-        print("device image: %s" % self.device_image_info)
-        print("test suite: %s" % self.test_suite_info)
-        print("fetch info: %s" % self.fetch_info)
-
-    def help_info(self):
-        """Prints help message for info command."""
-        self._info_parser.print_help(self._out_file)
-
     def _PrintTasks(self, tasks):
         """Shows a list of command tasks.
 
@@ -1341,6 +1372,14 @@ class Console(cmd.Cmd):
         """Initializes the parser for upload command."""
         self._upload_parser = ConsoleArgumentParser("upload",
             "Upload <src> file to <dest> Google Cloud Storage.")
+        self._upload_parser.add_argument(
+            "--type",
+            choices=("image", "result"),
+            default=None,
+            help="The dictionary where the source file is. The console finds "
+                "and uploads the file whose key matches --src. If this "
+                "argument is not specified, --src is the path to the source "
+                "file.")
         self._upload_parser.add_argument(
             "--src",
             required=True,
@@ -1373,6 +1412,18 @@ class Console(cmd.Cmd):
                 print("Unable to find {} in device_image_info".format(
                     src_name))
                 return
+        elif args.type:
+            if args.type == "image":
+                file_dict = self.device_image_info
+            elif args.type == "result":
+                file_dict = self.test_results
+            else:
+                print("ERROR: unknown type %s" % args.type)
+                return
+            if args.src not in file_dict:
+                print("ERROR: cannot find %s" % args.src)
+                return
+            src_path = file_dict[args.src]
         elif os.path.isfile(args.src):
             src_path = args.src
         else:
@@ -1396,22 +1447,28 @@ class Console(cmd.Cmd):
         self._upload_parser.print_help(self._out_file)
 
     # @Override
-    def onecmd(self, line):
+    def onecmd(self, line, depth=1):
         """Executes command(s) and prints any exception.
+
+        Parallel execution only for 2nd-level list element.
 
         Args:
             line: a list of string or string which keeps the command to run.
         """
         if type(line) == list:
-            jobs = []
-            for sub_command in line:
-                p = multiprocessing.Process(
-                    target=self.onecmd, args=(sub_command,))
-                jobs.append(p)
-                p.start()
-            for job in jobs:
-                job.join()
-            return
+            if depth == 1:  # 1 to use multi-threading
+                jobs = []
+                for sub_command in line:
+                    p = multiprocessing.Process(
+                        target=self.onecmd, args=(sub_command, depth + 1,))
+                    jobs.append(p)
+                    p.start()
+                for job in jobs:
+                    job.join()
+                return
+            else:
+                for sub_command in line:
+                    self.onecmd(sub_command, depth + 1)
 
         if line:
             print("Command: %s" % line)

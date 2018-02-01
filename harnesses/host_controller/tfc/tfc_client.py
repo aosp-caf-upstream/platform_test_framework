@@ -19,8 +19,8 @@ import logging
 import threading
 import time
 
-from apiclient import discovery
-from apiclient import http
+from googleapiclient import discovery
+from googleapiclient import http
 from oauth2client.service_account import ServiceAccountCredentials
 
 from host_controller.tfc import command_task

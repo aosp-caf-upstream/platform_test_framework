@@ -23,7 +23,6 @@ import logging
 import os
 import requests
 import urlparse
-import zipfile
 from posixpath import join as path_urljoin
 
 from oauth2client.client import flow_from_clientsecrets
@@ -110,8 +109,15 @@ class BuildProviderPAB(build_provider.BuildProvider):
         """Creates a temp dir."""
         super(BuildProviderPAB, self).__init__()
 
-    def Authenticate(self, userinfo_file=None):
-        """Authenticate using OAuth2."""
+    def Authenticate(self, userinfo_file=None, noauth_local_webserver=False):
+        """Authenticate using OAuth2.
+
+        Args:
+            userinfo_file: (optional) the path of a JSON file which has
+                           "email" and "password" string fields.
+            noauth_local_webserver: boolean, True if do not (or can not) use
+                                    a local web server.
+        """
         # this should be a JSON file with "email" and "password" string fields
         self._userinfo_file = userinfo_file
         logging.info('Parsing flags, use --noauth_local_webserver'
@@ -119,6 +125,7 @@ class BuildProviderPAB(build_provider.BuildProvider):
 
         parser = argparse.ArgumentParser(parents=[argparser])
         flags, unknown = parser.parse_known_args()
+        flags.noauth_local_webserver = noauth_local_webserver
         logging.info('Preparing OAuth token')
         flow = flow_from_clientsecrets(self.CLIENT_SECRETS, scope=self.SCOPE)
         storage = Storage(self.CLIENT_STORAGE)
@@ -159,10 +166,8 @@ class BuildProviderPAB(build_provider.BuildProvider):
 
         chrome_options = Options()
         chrome_options.add_argument("--headless")
-        chrome_options.binary_location = self.CHROME_LOCATION
 
         driver = webdriver.Chrome(
-            executable_path=os.path.abspath(self.CHROME_DRIVER_LOCATION),
             chrome_options=chrome_options)
 
         driver.set_window_size(1080, 800)
@@ -445,8 +450,7 @@ class BuildProviderPAB(build_provider.BuildProvider):
                     target,
                     artifact_name,
                     build_id='latest',
-                    method=GET,
-                    unzip=True):
+                    method=GET):
         """Get an artifact for an account, branch, target and name and build id.
 
         If build_id not given, get latest.
@@ -458,8 +462,7 @@ class BuildProviderPAB(build_provider.BuildProvider):
             artifact_name: name of artifact, e.g. aosp_arm64_ab-img-4353141.zip
                 ({id} will automatically get replaced with build ID)
             build_id: string, build ID of an artifact to fetch (or 'latest').
-            method: 'GET' or 'POST', which endpoint to query
-            unzip: boolean, True to unzip the artifact if that's a zip file.
+            method: 'GET' or 'POST', which endpoint to query.
 
         Returns:
             a dict containing the device image info.
@@ -512,17 +515,8 @@ class BuildProviderPAB(build_provider.BuildProvider):
         else:
             artifact_path = artifact_name
         self.DownloadArtifact(url, artifact_path)
-        dirname = os.path.dirname(artifact_path)
-        if unzip and artifact_path.endswith(".zip"):
-            artifact_basename = os.path.basename(artifact_path)
-            if artifact_path.endswith("android-vts.zip"):
-                self.SetTestSuitePackage("vts", artifact_path)
-            elif artifact_basename.startswith("vti-global-config"):
-                self.SetConfigPackage(
-                    "prod" if "prod" in artifact_basename else "test",
-                    artifact_path)
-            else:
-                self.SetDeviceImageZip(artifact_path)
+
+        self.SetFetchedFile(artifact_path)
+
         return (self.GetDeviceImage(), self.GetTestSuitePackage(),
                 artifact_info, self.GetConfigPackage())
-

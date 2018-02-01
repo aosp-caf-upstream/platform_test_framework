@@ -19,7 +19,7 @@ import socket
 import threading
 
 import httplib2
-from apiclient import errors
+from googleapiclient import errors
 
 from host_controller.tfc import command_attempt
 from host_controller.tradefed import remote_operation

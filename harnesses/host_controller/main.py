@@ -65,6 +65,31 @@ def _ParseInterval(interval_str):
     return interval * _SECONDS_PER_UNIT[unit]
 
 
+def _ScriptLoop(hc_console, script_path, loop_interval):
+    """Runs a console script repeatedly.
+
+    Args:
+        hc_console: the host controller console.
+        script_path: string, the path to the script.
+        loop_interval: float or integer, the interval in seconds.
+    """
+    next_start_time = time.time()
+    while hc_console.ProcessScript(script_path):
+        if loop_interval == 0:
+            continue
+        current_time = time.time()
+        skip_cnt = (current_time - next_start_time) // loop_interval
+        if skip_cnt >= 1:
+            logging.warning("Script execution time is longer than loop "
+                            "interval. Skip %d iteration(s).", skip_cnt)
+        next_start_time += (skip_cnt + 1) * loop_interval
+        if next_start_time - current_time >= 0:
+            time.sleep(next_start_time - current_time)
+        else:
+            logging.error("Unexpected timestamps: current=%f, next=%f",
+                          current_time, next_start_time)
+
+
 def main():
     """Parses arguments and starts console."""
     parser = argparse.ArgumentParser()
@@ -83,6 +108,11 @@ def main():
     parser.add_argument("--script",
                         default=None,
                         help="The path to a script file in .py format")
+    parser.add_argument("--serial",
+                        default=None,
+                        help="The default serial numbers for flashing and "
+                             "testing in the console. Multiple serial numbers "
+                             "are separated by comma.")
     parser.add_argument("--loop",
                         default=None,
                         metavar="INTERVAL",
@@ -156,29 +186,21 @@ def main():
             sys.stdin.readline()
     else:
         main_console = console.Console(vti_endpoint, tfc, pab, hosts)
-        if args.script:
-            next_start_time = time.time()
-            while main_console.ProcessScript(args.script):
+        try:
+            if args.serial:
+                main_console.SetSerials(args.serial.split(","))
+            if args.script:
                 if args.loop is None:
-                    break
-                if args.loop == 0:
-                    continue
-                current_time = time.time()
-                skip_cnt = (current_time - next_start_time) // args.loop
-                if skip_cnt >= 1:
-                    logging.warning("Script execution time is longer than "
-                                    "loop interval. Skip %d iteration(s).",
-                                    skip_cnt)
-                next_start_time += (skip_cnt + 1) * args.loop
-                if next_start_time - current_time >= 0:
-                    time.sleep(next_start_time - current_time)
+                    main_console.ProcessScript(args.script)
                 else:
-                    logging.error("Unexpected timestamps: current=%f, next=%f",
-                                  current_time, next_start_time)
-            if args.console:
+                    _ScriptLoop(main_console, args.script, args.loop)
+
+                if args.console:
+                    main_console.cmdloop()
+            else:  # if not script, the default is console mode.
                 main_console.cmdloop()
-        else:  # if not script, the default is console mode.
-            main_console.cmdloop()
+        finally:
+            main_console.TearDown()
 
     env_utils.RestoreEnvVars(env_vars)
 
