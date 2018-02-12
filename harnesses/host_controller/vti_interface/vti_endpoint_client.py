@@ -30,10 +30,13 @@ class VtiEndpointClient(object):
     """
 
     def __init__(self, url):
-        if not url.startswith(("https://")) and not url.startswith("http://"):
-            url = "https://" + url
-        if url.endswith("appspot.com"):
-            url += "/_ah/api/"
+        if url == "localhost":
+            url = "http://localhost:8080/_ah/api/"
+        else:
+            if not url.startswith(("https://")) and not url.startswith("http://"):
+                url = "https://" + url
+            if url.endswith("appspot.com"):
+                url += "/_ah/api/"
         self._headers = {"content-type": "application/json",
                    "Accept-Charset": "UTF-8"}
         self._url = url
@@ -56,7 +59,7 @@ class VtiEndpointClient(object):
             response = requests.post(url, data=json.dumps(build),
                                      headers=self._headers)
             if response.status_code != requests.codes.ok:
-                print "UploadDeviceInfo error: %s" % response
+                print("UploadBuildInfo error: %s" % response)
                 fail = True
         if fail:
             return False
@@ -86,7 +89,7 @@ class VtiEndpointClient(object):
         response = requests.post(url, data=json.dumps(payload),
                                  headers=self._headers)
         if response.status_code != requests.codes.ok:
-            print "UploadDeviceInfo error: %s" % response
+            print("UploadDeviceInfo error: %s" % response)
             return False
         return True
 
@@ -108,7 +111,7 @@ class VtiEndpointClient(object):
             url, data=json.dumps({"manifest_branch": "na"}),
             headers=self._headers)
         if response.status_code != requests.codes.ok:
-            print("UploadDeviceInfo error: %s" % response)
+            print("UploadScheduleInfo error: %s" % response)
             succ = False
 
         if not succ:
@@ -130,7 +133,7 @@ class VtiEndpointClient(object):
                     response = requests.post(url, data=json.dumps(schedule),
                                              headers=self._headers)
                     if response.status_code != requests.codes.ok:
-                        print("UploadDeviceInfo error: %s" % response)
+                        print("UploadScheduleInfo error: %s" % response)
                         succ = False
         return succ
 
@@ -151,7 +154,7 @@ class VtiEndpointClient(object):
         response = requests.post(url, data=json.dumps({"name": "na"}),
                                  headers=self._headers)
         if response.status_code != requests.codes.ok:
-            print "UploadDeviceInfo error: %s" % response
+            print("UploadLabInfo error: %s" % response)
             succ = False
 
         if not succ:
@@ -168,19 +171,29 @@ class VtiEndpointClient(object):
                 new_host["hostname"] = host.hostname
                 new_host["ip"] = host.ip
                 new_host["script"] = host.script
+                new_host["device"] = []
+                if host.device:
+                    for device in host.device:
+                        new_device = {}
+                        new_device["serial"] = device.serial
+                        new_device["product"] = device.product
+                        new_host["device"].append(new_device)
                 lab["host"].append(new_host)
             response = requests.post(url, data=json.dumps(lab),
                                      headers=self._headers)
             if response.status_code != requests.codes.ok:
-                print("UploadDeviceInfo error: %s" % response)
+                print("UploadLabInfo error: %s" % response)
                 succ = False
         return succ
 
-    def LeaseJob(self, hostname):
+    def LeaseJob(self, hostname, execute=True):
         """Leases a job for the given host, 'hostname'.
 
         Args:
             hostname: string, the hostname of a target host.
+            execute: boolean, True to lease and execute StartHeartbeat, which is
+                     the case that the leased job will be executed on this
+                     process's context.
 
         Returns:
             True if successful, False otherwise.
@@ -208,9 +221,28 @@ class VtiEndpointClient(object):
         jobs = response_json["jobs"]
         if jobs and len(jobs) > 0:
             for job in jobs:
-                self._job = job
-                self.StartHeartbeat("LEASED", 60)
+                if execute == True:
+                    self._job = job
+                    self.StartHeartbeat("LEASED", 60)
                 return job["test_name"].split("/")[0], job
+        return None, {}
+
+    def ExecuteJob(self, job):
+        """Executes leased job passed from parent process.
+
+        Args:
+            job: dict, information the on leased job.
+
+        Returns:
+            a string which is path to a script file for onecmd().
+            a dict contains info on the leased job, will be passed to onecmd().
+        """
+        print("Job info : {}".format(json.dumps(job)))
+        if job is not None:
+            self._job = job
+            self.StartHeartbeat("LEASED", 60)
+            return job["test_name"].split("/")[0], job
+
         return None, {}
 
     def UpdateLeasedJobStatus(self, status, update_interval):
@@ -270,4 +302,6 @@ class VtiEndpointClient(object):
         response = requests.post(url, data=json.dumps(self._job),
                                  headers=self._headers)
         if response.status_code != requests.codes.ok:
-            print("UpdateLeasedJobStatus error: %s" % response)
+            print("StopHeartbeat error: %s" % response)
+
+        self._job = None

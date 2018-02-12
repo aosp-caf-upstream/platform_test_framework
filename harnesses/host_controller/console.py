@@ -15,14 +15,18 @@
 #
 
 import cmd
+import ctypes
 import datetime
 import imp  # Python v2 compatibility
 import importlib
 import logging
-import multiprocessing
+import multiprocess
 import os
+import queue
+import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -84,11 +88,28 @@ DEVICE_STATUS_DICT = {
 
 _SPL_DEFAULT_DAY = 5
 
+# Maximum number of leased jobs per host.
+_MAX_LEASED_JOBS = 14
+
 
 COMMAND_PROCESSORS = [
     command_info.CommandInfo,
     command_test.CommandTest,
 ]
+
+
+def ExecJobOnProcessPoolWrapper(arg, **kwargs):
+    """Passes argument to Console.ExecjobOnProcessPool.
+
+    need to invoke a global function from a process pool
+    since methods are not picklable.
+
+    Args:
+        arg: tuple, consists of Console class instance from the main process
+             and a dict containing the leased job information.
+        kwargs: dict, currently not in use.
+    """
+    return Console.ExecJobOnProcessPool(*arg, **kwargs)
 
 
 class Console(cmd.Cmd):
@@ -99,8 +120,7 @@ class Console(cmd.Cmd):
                             map between command string and command processors.
         device_image_info: dict containing info about device image files.
         prompt: The prompt string at the beginning of each command line.
-        test_results: dict where the key is the name of the test suite and the
-                      value is the path to the result.
+        test_result: dict containing info about the last test result.
         test_suite_info: dict containing info about test suite package files.
         tools_info: dict containing info about custom tool files.
         build_thread: dict containing threading.Thread instances(s) that
@@ -108,6 +128,12 @@ class Console(cmd.Cmd):
         scheduler_thread: dict containing threading.Thread instances(s) that
                           update configs regularly.
         update_thread: threading.Thread that updates device state regularly.
+        leased_job_process: Process. Fetches leased jobs from leased_job_queue
+                           and maps them to process pool.
+        leased_job_running: multiprocess.Value, keeps running leased_job_process
+                            if equal to 1.
+        leased_job_queue: multiprocess.Queue. Jobs leased will be pushed form
+                          the main process, popped and executed on process pool.
         _build_provider_pab: The BuildProviderPAB used to download artifacts.
         _vti_client: VtiEndpoewrClient, used to upload data to a test
                      scheduling infrastructure.
@@ -152,12 +178,15 @@ class Console(cmd.Cmd):
         self.prompt = "> "
         self.command_processors = {}
         self.device_image_info = {}
-        self.test_results = {}
+        self.test_result = {}
         self.test_suite_info = {}
         self.tools_info = {}
         self.build_thread = {}
         self.schedule_thread = {}
         self.update_thread = None
+        self.leased_job_process = None
+        self.leased_job_running = None
+        self.leased_job_queue = None
         self.fetch_info = {}
 
         if _ANDROID_SERIAL in os.environ:
@@ -167,6 +196,7 @@ class Console(cmd.Cmd):
 
         self.InitCommandModuleParsers()
         self.SetUpCommandProcessors()
+        self.StartLeasedJobExecutionProcess()
 
     def InitCommandModuleParsers(self):
         """Init all console command modules"""
@@ -192,6 +222,35 @@ class Console(cmd.Cmd):
         for command_processor in self.command_processors.itervalues():
             command_processor._TearDown()
         self.command_processors.clear()
+
+    def FormatString(self, format_string):
+        """Replaces variables with the values in the console's dictionaries.
+
+        Args:
+            format_string: The string containing variables enclosed in {}.
+
+        Returns:
+            The formatted string.
+
+        Raises:
+            KeyError if a variable is not found in the dictionaries or the
+            value is empty.
+        """
+        def ReplaceVariable(match):
+            name = match.group(1)
+            if name in ("build_id", "branch", "target"):
+                value = self.fetch_info[name]
+            elif name in ("result_zip", "suite_plan"):
+                value = self.test_result[name]
+            else:
+                value = None
+
+            if not value:
+                raise KeyError(name)
+
+            return value
+
+        return re.sub("{([^}]+)}", ReplaceVariable, format_string)
 
     def _InitRequestParser(self):
         """Initializes the parser for request command."""
@@ -559,6 +618,10 @@ class Console(cmd.Cmd):
         self._flash_parser = ConsoleArgumentParser("flash",
                                                    "Flash images to a device.")
         self._flash_parser.add_argument(
+            "--image",
+            help=("The file name of an image to flash."
+                  " Used to flash a single image."))
+        self._flash_parser.add_argument(
             "--current",
             metavar="PARTITION_IMAGE",
             nargs="*",
@@ -605,6 +668,14 @@ class Console(cmd.Cmd):
             default="tar.md5",
             choices=("tar.md5"),
             help="Repackage artifacts into given format before flashing.")
+        self._flash_parser.add_argument(
+            "--wait-for-boot",
+            default="true",
+            help="false to not wait for devie booting.")
+        self._flash_parser.add_argument(
+            "--reboot",
+            default="false",
+            help="true to reboot the device(s).")
 
     def do_flash(self, line):
         """Flash GSI or build images to a device connected with ADB."""
@@ -618,6 +689,9 @@ class Console(cmd.Cmd):
             flasher_path = args.flasher_path
         else:
             flasher_path = ""
+        flasher_mode = os.stat(flasher_path).st_mode
+        os.chmod(flasher_path,
+                 flasher_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         # serial numbers
         if args.serial:
@@ -628,14 +702,18 @@ class Console(cmd.Cmd):
             flasher_serials = [""]
 
         # images
-        if args.current:
-            partition_image = dict((partition, self.device_image_info[image])
-                                   for partition, image in args.current)
+        if args.image:
+            partition_image = {}
+            partition_image[args.image] = self.device_image_info[args.image]
         else:
-            partition_image = dict((image.rsplit(".img", 1)[0],
-                                    self.device_image_info[image])
-                                   for image in _DEFAULT_FLASH_IMAGES
-                                   if image in self.device_image_info)
+            if args.current:
+                partition_image = dict((partition, self.device_image_info[image])
+                                       for partition, image in args.current)
+            else:
+                partition_image = dict((image.rsplit(".img", 1)[0],
+                                        self.device_image_info[image])
+                                       for image in _DEFAULT_FLASH_IMAGES
+                                       if image in self.device_image_info)
 
         # type
         if args.flasher_type in ("fastboot", "custom"):
@@ -653,7 +731,11 @@ class Console(cmd.Cmd):
         # Can be parallelized as long as that's proven reliable.
         for flasher in flashers:
             if args.flasher_type == "fastboot":
-                if args.current is not None:
+                if args.image is not None:
+                    flasher.FlashImage(
+                        partition_image,
+                        True if args.reboot == "true" else False)
+                elif args.current is not None:
                     flasher.Flash(partition_image)
                 else:
                     if args.gsi is None and args.build_dir is None:
@@ -679,8 +761,9 @@ class Console(cmd.Cmd):
                 flasher.Flash(
                     partition_image, self.tools_info, *args.flasher_args)
 
-        for flasher in flashers:
-            flasher.WaitForDevice()
+        if args.wait_for_boot == "true":
+            for flasher in flashers:
+                flasher.WaitForDevice()
 
     def help_flash(self):
         """Prints help message for flash command."""
@@ -1122,6 +1205,81 @@ class Console(cmd.Cmd):
         """
         return self._serials
 
+    def StartLeasedJobExecutionProcess(self, map_interval=1):
+        """Executes process that runs the leased job.
+
+        Args:
+            map_interval: int, time between mapping the leased jobs to process
+                          pool in seconds. Default value is 30
+        """
+        leased_job_queue = multiprocess.Queue()
+        leased_job_running = multiprocess.Value("b", 0)
+        process = multiprocess.Process(
+            target=self.ExecLeasedJobs,
+            args=(leased_job_queue,
+                  leased_job_running,
+                  map_interval,)
+        )
+        process.start()
+
+        self.leased_job_process = process
+        self.leased_job_queue = leased_job_queue
+        self.leased_job_running = leased_job_running
+
+    def StopLeasedJobExecutionProcess(self):
+        """Terminates the process that runs the leased job."""
+        self.leased_job_running = 0
+        self.leased_job_process.terminate()
+
+    def ExecJobOnProcessPool(self, job):
+        """Executes a job from job queue.
+
+        Args:
+            job: dict, contains the information on the leased job passed to this
+                 process.
+        """
+        print("Executing a leased job on process {}".format(os.getpid()))
+        filepath, kwargs = self._vti_endpoint_client.ExecuteJob(job)
+        if filepath:
+            ret = self.ProcessConfigurableScript(
+                os.path.join(os.getcwd(), "host_controller", "campaigns",
+                             filepath),
+                **kwargs)
+            if ret:
+                job_status = "COMPLETE"
+            else:
+                job_status = "INFRA_ERROR"
+
+            self._vti_endpoint_client.StopHeartbeat(job_status)
+            print("Job execution complete. "
+                  "Setting job status to {}".format(job_status))
+
+    def ExecLeasedJobs(self, job_queue, process_running, map_interval):
+        """Pops jobs from job_queue and execute them on process pool.
+
+        Args:
+            job_queue: multiprocess.Queue, a queue from which to get the
+                       leased jobs. Shared with the main process.
+            process_running: byte, continue to run the while loop if equal to 1.
+                             Shared with the main process.
+            map_interval: int, time between mapping the leased jobs to process
+                          pool in seconds.
+        """
+        leased_job_exec_pool = multiprocess.Pool(processes=_MAX_LEASED_JOBS)
+
+        while True:
+            if process_running:
+                arg_list = []
+                while not job_queue.empty():
+                    leased_job = job_queue.get()
+                    pair = (self, leased_job)
+                    arg_list.append(pair)
+
+                if len(arg_list) > 0:
+                    leased_job_exec_pool.map_async(ExecJobOnProcessPoolWrapper,
+                                                   arg_list)
+            time.sleep(map_interval)
+
     def UpdateDevice(self, server_type, host, lease):
         """Updates the device state of all devices on a given host.
 
@@ -1172,16 +1330,10 @@ class Console(cmd.Cmd):
 
             if lease:
                 filepath, kwargs = self._vti_endpoint_client.LeaseJob(
-                    socket.gethostname())
-                if filepath:
-                    ret = self.ProcessConfigurableScript(
-                        os.path.join(os.getcwd(), "host_controller", "campaigns",
-                                     filepath),
-                        **kwargs)
-                    if ret:
-                        self._vti_endpoint_client.StopHeartbeat("COMPLETE")
-                    else:
-                        self._vti_endpoint_client.StopHeartbeat("INFRA_ERROR")
+                    socket.gethostname(), False)
+                if filepath is not None:
+                    self.leased_job_queue.put(kwargs)
+
         elif server_type == "tfc":
             devices = host.ListDevices()
             for device in devices:
@@ -1245,8 +1397,12 @@ class Console(cmd.Cmd):
                     ))
                 self.update_thread.daemon = True
                 self.update_thread.start()
+                if args.lease:
+                    self.leased_job_running = 1
             elif args.update == "stop":
                 self.update_thread.keep_running = False
+                if self.leased_job_running:
+                    self.leased_job_running = 0
 
     def help_device(self):
         """Prints help message for device command."""
@@ -1329,7 +1485,7 @@ class Console(cmd.Cmd):
         output_path = os.path.join(
             os.path.dirname(os.path.abspath(gsi_path)),
             "system-{}.img".format(version))
-        _, stderr, err_code = cmd_utils.ExecuteOneShellCommand(
+        stdout, _, err_code = cmd_utils.ExecuteOneShellCommand(
             "{} {} {} {}".format(
                 os.path.join(os.getcwd(), "host_controller", "gsi",
                              "change_security_patch_ver.sh"), gsi_path,
@@ -1339,7 +1495,7 @@ class Console(cmd.Cmd):
                 print("system.img path is updated to : {}".format(output_path))
                 self.device_image_info["system.img"] = output_path
         else:
-            print "gsispl error: {}".format(stderr)
+            print "gsispl error: {}".format(stdout)
             return
 
     def help_gsispl(self):
@@ -1362,6 +1518,7 @@ class Console(cmd.Cmd):
         Returns:
             True, which stops the cmdloop.
         """
+        self.StopLeasedJobExecutionProcess()
         return True
 
     def help_exit(self):
@@ -1370,16 +1527,11 @@ class Console(cmd.Cmd):
 
     def _InitUploadParser(self):
         """Initializes the parser for upload command."""
-        self._upload_parser = ConsoleArgumentParser("upload",
-            "Upload <src> file to <dest> Google Cloud Storage.")
-        self._upload_parser.add_argument(
-            "--type",
-            choices=("image", "result"),
-            default=None,
-            help="The dictionary where the source file is. The console finds "
-                "and uploads the file whose key matches --src. If this "
-                "argument is not specified, --src is the path to the source "
-                "file.")
+        self._upload_parser = ConsoleArgumentParser(
+            "upload",
+            "Upload <src> file to <dest> Google Cloud Storage. "
+            "In <src> and <dest>, variables enclosed in {} are replaced "
+            "with the values stored in the console.")
         self._upload_parser.add_argument(
             "--src",
             required=True,
@@ -1392,8 +1544,7 @@ class Console(cmd.Cmd):
         self._upload_parser.add_argument(
             "--dest",
             required=True,
-            help="Google Cloud Storage URL. {build-id} will be "
-                "replaced with the most recently fetched build id.")
+            help="Google Cloud Storage URL to which the file is uploaded.")
 
     def do_upload(self, line):
         """Upload args.src file to args.dest Google Cloud Storage."""
@@ -1412,30 +1563,29 @@ class Console(cmd.Cmd):
                 print("Unable to find {} in device_image_info".format(
                     src_name))
                 return
-        elif args.type:
-            if args.type == "image":
-                file_dict = self.device_image_info
-            elif args.type == "result":
-                file_dict = self.test_results
-            else:
-                print("ERROR: unknown type %s" % args.type)
-                return
-            if args.src not in file_dict:
-                print("ERROR: cannot find %s" % args.src)
-                return
-            src_path = file_dict[args.src]
-        elif os.path.isfile(args.src):
-            src_path = args.src
         else:
-            print("Cannot find a file: {}".format(args.src))
+            try:
+                src_path = self.FormatString(args.src)
+            except KeyError as e:
+                print("Unknown or uninitialized variable in src: %s" % e)
+                return
+
+        if not os.path.isfile(src_path):
+            print("Cannot find a file: {}".format(src_path))
             return
 
-        if not args.dest.startswith("gs://"):
-            print("{} is not correct GCS url.".format(args.dest))
+        try:
+            dest_path = self.FormatString(args.dest)
+        except KeyError as e:
+            print("Unknown or uninitialized variable in dest: %s" % e)
+            return
+
+        if not dest_path.startswith("gs://"):
+            print("{} is not correct GCS url.".format(dest_path))
             return
         """ TODO(jongmok) : Before upload, login status, authorization,
                             and dest check are required. """
-        copy_command = "{} cp {} {}".format(gsutil_path, src_path, args.dest)
+        copy_command = "{} cp {} {}".format(gsutil_path, src_path, dest_path)
         _, stderr, err_code = cmd_utils.ExecuteOneShellCommand(
             copy_command)
 
@@ -1459,7 +1609,7 @@ class Console(cmd.Cmd):
             if depth == 1:  # 1 to use multi-threading
                 jobs = []
                 for sub_command in line:
-                    p = multiprocessing.Process(
+                    p = multiprocess.Process(
                         target=self.onecmd, args=(sub_command, depth + 1,))
                     jobs.append(p)
                     p.start()
