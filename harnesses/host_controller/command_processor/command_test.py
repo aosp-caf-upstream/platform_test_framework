@@ -216,6 +216,7 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
                     self.console.test_result.update(result)
         else:
             print("unsupported exec mode: %s", args.test_exec_mode)
+            return False
 
     # @Override
     def TearDown(self):
