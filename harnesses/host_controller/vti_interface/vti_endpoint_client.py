@@ -16,6 +16,8 @@
 
 import json
 import requests
+import threading
+import time
 
 
 class VtiEndpointClient(object):
@@ -24,6 +26,7 @@ class VtiEndpointClient(object):
     Attributes:
         _headers: A dictionary, containing HTTP request header information.
         _url: string, the base URL of an endpoint API.
+        _job: dict, currently leased job info.
     """
 
     def __init__(self, url):
@@ -34,6 +37,8 @@ class VtiEndpointClient(object):
         self._headers = {"content-type": "application/json",
                    "Accept-Charset": "UTF-8"}
         self._url = url
+        self._job = {}
+        self._heartbeat_thread = None
 
     def UploadBuildInfo(self, builds):
         """Uploads the given build information to VTI.
@@ -203,5 +208,66 @@ class VtiEndpointClient(object):
         jobs = response_json["jobs"]
         if jobs and len(jobs) > 0:
             for job in jobs:
+                self._job = job
+                self.StartHeartbeat("LEASED", 60)
                 return job["test_name"].split("/")[0], job
         return None, {}
+
+    def UpdateLeasedJobStatus(self, status, update_interval):
+        """Updates the status of the leased job.
+
+        Args:
+            status: string, status value.
+            update_interval: int, time between heartbeats in second.
+        """
+        if self._job is None:
+            return
+
+        url = self._url + "job_queue/v1/heartbeat"
+        self._job["status"] = status
+
+        thread = threading.currentThread()
+        while getattr(thread, 'keep_running', True):
+            response = requests.post(url, data=json.dumps(self._job),
+                                    headers=self._headers)
+            if response.status_code != requests.codes.ok:
+                print("UpdateLeasedJobStatus error: %s" % response)
+            time.sleep(update_interval)
+
+    def StartHeartbeat(self, status="LEASED", update_interval=60):
+        """Starts the hearbeat_thread.
+
+        Args:
+            status: string, status value.
+            update_interval: int, time between heartbeats in second.
+        """
+        if (self._heartbeat_thread is None
+            or hasattr(self._heartbeat_thread, 'keep_running')):
+            self._heartbeat_thread = threading.Thread(
+                target=self.UpdateLeasedJobStatus,
+                args=(
+                    status,
+                    update_interval,
+                ))
+            self._heartbeat_thread.daemon = True
+            self._heartbeat_thread.start()
+
+    def StopHeartbeat(self, status="COMPLETE"):
+        """Stops the hearbeat_thread and sets current job's status.
+
+        Args:
+            status: string, status value.
+        """
+        self._heartbeat_thread.keep_running = False
+
+        if self._job is None:
+            return
+
+        url = self._url + "job_queue/v1/heartbeat"
+        if self._job is not None and self._job["status"] == "LEASED":
+            self._job["status"] = status
+
+        response = requests.post(url, data=json.dumps(self._job),
+                                 headers=self._headers)
+        if response.status_code != requests.codes.ok:
+            print("UpdateLeasedJobStatus error: %s" % response)

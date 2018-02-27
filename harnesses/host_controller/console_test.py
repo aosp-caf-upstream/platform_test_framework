@@ -28,6 +28,7 @@ try:
 except ImportError:
     import io as string_io_module
 
+from host_controller.build import build_flasher
 from host_controller.tfc import command_task
 from host_controller.tfc import device_info
 from host_controller import console
@@ -38,9 +39,10 @@ class ConsoleTest(unittest.TestCase):
 
     Attribute:
         _out_file: The console output buffer.
-        _host_controller: A mock host_controller.HostController.
+        _host_controller: A mock tfc_host_controller.HostController.
         _build_provider_pab: A mock build_provider_pab.BuildProviderPAB.
         _tfc_client: A mock tfc_client.TfcClient.
+        _vti_client A mock vti_endpoint_client.VtiEndpointClient.
         _console: The console being tested.
     """
     _DEVICES = [
@@ -66,10 +68,11 @@ class ConsoleTest(unittest.TestCase):
         self._host_controller = mock.Mock()
         self._build_provider_pab = mock.Mock()
         self._tfc_client = mock.Mock()
-        self._console = console.Console(self._tfc_client,
-                                        self._build_provider_pab,
-                                        [self._host_controller], None,
-                                        self._out_file)
+        self._vti_client = mock.Mock()
+        self._console = console.Console(
+            self._vti_client, self._tfc_client, self._build_provider_pab,
+            [self._host_controller],
+            None, self._out_file)
 
     def tearDown(self):
         """Closes the output file."""
@@ -151,7 +154,7 @@ class ConsoleTest(unittest.TestCase):
             "/mock/system.img",
             "odm.img":
             "/mock/odm.img"
-        }, None, {"build_id":"build_id"})
+        }, {}, {"build_id": "build_id"}, {})
         self._IssueCommand(
             "fetch --branch=aosp-master-ndk --target=darwin_mac "
             "--account_id=100621237 "
@@ -176,14 +179,14 @@ class ConsoleTest(unittest.TestCase):
         """Tests fetching from pab and check stored os environment"""
         build_id_return = "4328532"
         target_return = "darwin_mac"
-        expected_fetch_info = {"build_id":build_id_return}
+        expected_fetch_info = {"build_id": build_id_return}
 
         self._build_provider_pab.GetArtifact.return_value = ({
             "system.img":
             "/mock/system.img",
             "odm.img":
             "/mock/odm.img"
-        }, None, expected_fetch_info)
+        }, {}, expected_fetch_info, {})
         self._IssueCommand("fetch --branch=aosp-master-ndk --target=%s "
                            "--account_id=100621237 "
                            "--artifact_name=foo-{id}.tar.bz2 --method=POST"
@@ -219,6 +222,25 @@ class ConsoleTest(unittest.TestCase):
         mock_class.return_value = flasher
         self._IssueCommand("flash --build_dir=path/to/dir/")
         flasher.Flashall.assert_called_with('path/to/dir/')
+
+    @mock.patch('host_controller.console.importlib')
+    @mock.patch('host_controller.console.issubclass')
+    def testImportFlasher(self, mock_issubclass, mock_importlib):
+        mock_issubclass.return_value = True
+        flasher_module = mock.Mock()
+        flasher = mock.Mock()
+        mock_importlib.import_module.return_value = flasher_module
+        flasher_module.Flasher.return_value = flasher
+        self._IssueCommand("flash --serial ABC001 "
+                           "--flasher_type test.flasher.Flasher "
+                           "--flasher_path /test/flasher "
+                           "-- --unit test")
+        mock_issubclass.assert_called_once_with(
+            flasher_module.Flasher, build_flasher.BuildFlasher)
+        mock_importlib.import_module.assert_called_with("test.flasher")
+        flasher_module.Flasher.assert_called_with("ABC001", "/test/flasher")
+        flasher.Flash.assert_called_with({}, {}, "--unit", "test")
+        flasher.WaitForDevice.assert_called_with()
 
 
 if __name__ == "__main__":

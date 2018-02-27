@@ -22,12 +22,38 @@ import zipfile
 from host_controller.build import build_provider
 from vts.utils.python.common import cmd_utils
 
+_GCLOUD_AUTH_ENV_KEY = "run_gcs_key"
+
 
 class BuildProviderGCS(build_provider.BuildProvider):
     """A build provider for GCS (Google Cloud Storage)."""
 
     def __init__(self):
         super(BuildProviderGCS, self).__init__()
+        if _GCLOUD_AUTH_ENV_KEY in os.environ:
+            gcloud_path = BuildProviderGCS.GetGcloudPath()
+            if gcloud_path is not None:
+                auth_cmd = "%s auth activate-service-account --key-file=%s" % (
+                    gcloud_path, os.environ[_GCLOUD_AUTH_ENV_KEY])
+                _, stderr, ret_code = cmd_utils.ExecuteOneShellCommand(
+                    auth_cmd)
+                if ret_code == 0:
+                    logging.info(stderr)
+                else:
+                    print(stderr)
+                    logging.error(stderr)
+
+    @staticmethod
+    def GetGcloudPath():
+        """Returns the gcloud file path if found; None otherwise."""
+        sh_stdout, _, ret_code = cmd_utils.ExecuteOneShellCommand(
+            "which gcloud")
+        if ret_code == 0:
+            return sh_stdout.strip()
+        else:
+            logging.error("`gcloud` doesn't exist on the host; "
+                          "please install Google Cloud SDK before retrying.")
+            return None
 
     @staticmethod
     def GetGsutilPath():
@@ -56,12 +82,11 @@ class BuildProviderGCS(build_provider.BuildProvider):
         _, _, ret_code = cmd_utils.ExecuteOneShellCommand(check_command)
         return ret_code == 0
 
-    def Fetch(self, path, tool=None):
+    def Fetch(self, path):
         """Fetches Android device artifact file(s) from GCS.
 
         Args:
             path: string, the path of a directory which keeps artifacts.
-            tool: string, the path of a custom tool to be fetched from GCS.
 
         Returns:
             a dict containing the device image info.
@@ -71,36 +96,29 @@ class BuildProviderGCS(build_provider.BuildProvider):
         if not path.startswith("gs://"):
             path = "gs://" + re.sub("^/*", "", path)
         path = re.sub("/*$", "", path)
-        if tool is not None:
-            path = os.path.join(path, re.sub("/*$", "", tool))
-        tools_info = {}
         # make sure gsutil is available. Instead of a Python library,
         # gsutil binary is used that is to avoid packaging GCS PIP package
         # as part of VTS HC (Host Controller).
         gsutil_path = BuildProviderGCS.GetGsutilPath()
         if gsutil_path:
             temp_dir_path = self.CreateNewTmpDir()
-            if not BuildProviderGCS.IsGcsFile(gsutil_path,
-                                              path):  # directory (not exist)
+            # IsGcsFile returns False if path is directory or doesn't exist.
+            # cp command returns non-zero if path doesn't exist.
+            if not BuildProviderGCS.IsGcsFile(gsutil_path, path):
+                dest_path = temp_dir_path
                 copy_command = "%s cp -r %s/* %s" % (gsutil_path, path,
                                                      temp_dir_path)
-                _, _, ret_code = cmd_utils.ExecuteOneShellCommand(copy_command)
-                if ret_code == 0:
-                    self.SetDeviceImagesInDirecotry(temp_dir_path)
-                else:
-                    print("Error in copy files from GCS (code %s)." % ret_code)
             else:
+                dest_path = os.path.join(temp_dir_path, os.path.basename(path))
                 copy_command = "%s cp %s %s" % (gsutil_path, path,
                                                 temp_dir_path)
-                _, _, ret_code = cmd_utils.ExecuteOneShellCommand(copy_command)
-                dest_file_path = os.path.join(temp_dir_path,
-                                              os.path.basename(path))
-                if ret_code == 0:
-                    if tool is None:
-                        self.SetTestSuitePackage("vts", dest_file_path)
-                    else:
-                        os.chmod(dest_file_path, 0755)
-                        tools_info[os.path.basename(tool)] = dest_file_path
-                else:
-                    print("Error in copy file from GCS (code %s)." % ret_code)
-        return self.GetDeviceImage(), self.GetTestSuitePackage(), tools_info
+
+            _, _, ret_code = cmd_utils.ExecuteOneShellCommand(copy_command)
+            if ret_code == 0:
+                self.SetFetchedFile(dest_path, temp_dir_path)
+            else:
+                logging.error("Error in copy file from GCS (code %s)." %
+                              ret_code)
+        return (self.GetDeviceImage(),
+                self.GetTestSuitePackage(),
+                self.GetAdditionalFile())
