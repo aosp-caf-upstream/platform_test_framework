@@ -21,6 +21,7 @@ import tempfile
 import unittest
 import zipfile
 
+from host_controller import common
 from host_controller.build import build_provider
 
 try:
@@ -120,7 +121,7 @@ class BuildProviderTest(unittest.TestCase):
 
         self.assertEqual(
             img_path,
-            self._build_provider.GetDeviceImage(build_provider.FULL_ZIPFILE))
+            self._build_provider.GetDeviceImage(common.FULL_ZIPFILE))
 
     def testSetConfigPackage(self):
         """Tests setting a config package."""
@@ -140,7 +141,7 @@ class BuildProviderTest(unittest.TestCase):
         self._build_provider.SetFetchedDirectory(self._temp_dir)
 
         self.assertDictContainsSubset(
-            {build_provider.FULL_ZIPFILE: img_zip, "userdata.img": img_file},
+            {common.FULL_ZIPFILE: img_zip, "userdata.img": img_file},
             self._build_provider.GetDeviceImage())
         self.assertTrue(
             os.path.exists(self._build_provider.GetTestSuitePackage("vts")))

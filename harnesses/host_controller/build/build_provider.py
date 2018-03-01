@@ -19,9 +19,8 @@ import shutil
 import tempfile
 import zipfile
 
+from host_controller import common
 from vts.runners.host import utils
-
-FULL_ZIPFILE = "full-zipfile"
 
 
 class BuildProvider(object):
@@ -107,7 +106,7 @@ class BuildProvider(object):
         dest_path = path + ".dir"
         with zipfile.ZipFile(path, 'r') as zip_ref:
             if self._IsFullDeviceImage(zip_ref.namelist()):
-                self.SetDeviceImage(FULL_ZIPFILE, path)
+                self.SetDeviceImage(common.FULL_ZIPFILE, path)
             else:
                 zip_ref.extractall(dest_path)
                 self.SetFetchedDirectory(dest_path)

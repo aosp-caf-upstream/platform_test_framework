@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 
-from host_controller.build import build_provider
+from host_controller import common
 from vts.utils.python.common import cmd_utils
 from vts.utils.python.controllers import android_device
 
@@ -150,16 +150,16 @@ class BuildFlasher(object):
                 self.device.log.info(self.device.fastboot.reboot_bootloader())
 
         print("starting to flash vendor and other images...")
-        if build_provider.FULL_ZIPFILE in device_images:
+        if common.FULL_ZIPFILE in device_images:
             print("fastboot update %s --skip-reboot" %
-                  (device_images[build_provider.FULL_ZIPFILE]))
+                  (device_images[common.FULL_ZIPFILE]))
             self.device.log.info(
                 self.device.fastboot.update(
-                    device_images[build_provider.FULL_ZIPFILE],
+                    device_images[common.FULL_ZIPFILE],
                     "--skip-reboot"))
 
         for partition, image_path in device_images.iteritems():
-            if partition in (build_provider.FULL_ZIPFILE, "system", "vbmeta",
+            if partition in (common.FULL_ZIPFILE, "system", "vbmeta",
                              "bootloader", "radio"):
                 continue
             if not image_path:

@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-from host_controller.console import _DEFAULT_ACCOUNT_ID_INTERNAL
+from host_controller import common
 
 # The list of the kwargs key. can retrieve informations on the leased job.
 _JOB_ATTR_LIST = [
@@ -50,10 +50,10 @@ def EmitConsoleCommands(**kwargs):
     else:
         build_target = kwargs["build_target"]
 
-    if "pab_account_id" in kwargs and kwargs["pab_account_id"] != "":
+    if "pab_account_id" in kwargs and kwargs["pab_account_id"]:
         pab_account_id = kwargs["pab_account_id"]
     else:
-        pab_account_id = _DEFAULT_ACCOUNT_ID_INTERNAL
+        pab_account_id = common._DEFAULT_ACCOUNT_ID_INTERNAL
 
     manifest_branch = kwargs["manifest_branch"]
     build_id = kwargs["build_id"]
@@ -73,16 +73,25 @@ def EmitConsoleCommands(**kwargs):
         "--build_id=%s --account_id=%s" % (manifest_branch, build_target,
                                            build_id, pab_account_id))
 
+    if "gsi_build_id" in kwargs and kwargs["gsi_build_id"]:
+        gsi_build_id = kwargs["gsi_build_id"]
+    else:
+        gsi_build_id = "latest"
     result.append(
         "fetch --type=pab --branch=%s --target=%s "
-        "--artifact_name=aosp_arm64_ab-img-{build_id}.zip --build_id=latest" %
-        (kwargs["gsi_branch"], kwargs["gsi_build_target"]))
+        "--artifact_name=aosp_arm64_ab-img-{build_id}.zip --build_id=%s" %
+        (kwargs["gsi_branch"], kwargs["gsi_build_target"], gsi_build_id))
     if "gsi_pab_account_id" in kwargs and kwargs["gsi_pab_account_id"] != "":
         result[-1] += " --account_id=%s" % kwargs["gsi_pab_account_id"]
 
+    if "test_build_id" in kwargs and kwargs["test_build_id"]:
+        test_build_id = kwargs["test_build_id"]
+    else:
+        test_build_id = "latest"
     result.append("fetch --type=pab --branch=%s --target=%s "
-                  "--artifact_name=android-vts.zip --build_id=latest" %
-                  (kwargs["test_branch"], kwargs["test_build_target"]))
+                  "--artifact_name=android-vts.zip --build_id=%s" %
+                  (kwargs["test_branch"], kwargs["test_build_target"],
+                   test_build_id))
     if "test_pab_account_id" in kwargs and kwargs["test_pab_account_id"] != "":
         result[-1] += " --account_id=%s" % kwargs["test_pab_account_id"]
 
@@ -115,8 +124,12 @@ def EmitConsoleCommands(**kwargs):
             result.append("test --keep-result -- %s --shards %s" % (test_name,
                                                                     shards))
 
-        result.append(
-            "upload --src={result_zip} --dest=gs://vts-report/{suite_plan}"
-            "/{branch}/{target}/{build_id}_{timestamp}.zip")
+    if "retry_count" in kwargs:
+        retry_count = int(kwargs["retry_count"])
+        result.append("retry --count %d" % retry_count)
+
+    result.append(
+        "upload --src={result_full} --dest=gs://vts-report/{suite_plan}"
+        "/{branch}/{target}/%s_{build_id}_{timestamp}/" % build_target)
 
     return result

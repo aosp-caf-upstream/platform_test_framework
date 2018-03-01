@@ -22,6 +22,7 @@ import time
 
 from googleapiclient import errors
 
+from host_controller import common
 from host_controller.command_processor import base_command_processor
 from host_controller.console_argument_parser import ConsoleArgumentError
 from host_controller.tradefed import remote_operation
@@ -162,7 +163,7 @@ class CommandBuild(base_command_processor.BaseCommandProcessor):
             help="a comma-separate list of build target product(s).")
         self.arg_parser.add_argument(
             "--account_id",
-            default=self.console._DEFAULT_ACCOUNT_ID,
+            default=common._DEFAULT_ACCOUNT_ID,
             help="Partner Android Build account_id to use.")
         self.arg_parser.add_argument(
             "--method",

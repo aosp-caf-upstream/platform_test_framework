@@ -21,12 +21,10 @@ import argparse
 import json
 import zipfile
 
+from host_controller import common
 from host_controller.build import build_provider_ab
 from host_controller.build import build_provider_pab
 from vts.utils.python.common import cmd_utils
-
-# The default Partner Android Build (PAB) public account.
-_DEFAULT_ACCOUNT_ID = '543365459'
 
 
 def ValidateValues(args):
@@ -93,7 +91,7 @@ def StartBatch(values):
         else:
             build_provider = build_provider_pab.BuildProviderPAB()
             device_images, _, _ = build_provider.GetArtifact(
-                account_id=_DEFAULT_ACCOUNT_ID,
+                account_id=common._DEFAULT_ACCOUNT_ID,
                 branch=values["branch"],
                 target="{}-{}".format(target, values["build_variant"]),
                 artifact_name="{}-img-{}.zip".format(target, "{build_id}"),

@@ -55,7 +55,7 @@ class CommandUpload(base_command_processor.BaseCommandProcessor):
             name = match.group(1)
             if name in ("build_id", "branch", "target"):
                 value = self.console.fetch_info[name]
-            elif name in ("result_zip", "suite_plan"):
+            elif name in ("result_full", "result_zip", "suite_plan"):
                 value = self.console.test_result[name]
             elif name in ("timestamp"):
                 value = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -106,14 +106,17 @@ class CommandUpload(base_command_processor.BaseCommandProcessor):
                 return False
         else:
             try:
-                src_path = self.FormatString(args.src)
+                src_paths = self.FormatString(args.src)
             except KeyError as e:
                 print("Unknown or uninitialized variable in src: %s" % e)
                 return False
 
-        if not os.path.isfile(src_path):
-            print("Cannot find a file: {}".format(src_path))
-            return False
+        src_path_list = src_paths.split(" ")
+        for path in src_path_list:
+            src_path = path.strip()
+            if not os.path.isfile(src_path):
+                print("Cannot find a file: {}".format(src_path))
+                return False
 
         try:
             dest_path = self.FormatString(args.dest)
@@ -126,7 +129,7 @@ class CommandUpload(base_command_processor.BaseCommandProcessor):
             return False
         """ TODO(jongmok) : Before upload, login status, authorization,
                             and dest check are required. """
-        copy_command = "{} cp {} {}".format(gsutil_path, src_path, dest_path)
+        copy_command = "{} cp {} {}".format(gsutil_path, src_paths, dest_path)
         _, stderr, err_code = cmd_utils.ExecuteOneShellCommand(copy_command)
 
         if err_code:

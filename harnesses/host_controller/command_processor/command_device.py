@@ -22,6 +22,7 @@ import time
 
 from googleapiclient import errors
 
+from host_controller import common
 from host_controller.command_processor import base_command_processor
 from host_controller.console_argument_parser import ConsoleArgumentError
 from host_controller.tradefed import remote_operation
@@ -62,16 +63,23 @@ class CommandDevice(base_command_processor.BaseCommandProcessor):
                 if len(line.strip()):
                     device = {}
                     device["serial"] = line.split()[0]
-                    stdout, _, retcode = cmd_utils.ExecuteOneShellCommand(
-                        "adb -s %s shell getprop ro.product.board" %
-                        device["serial"])
-                    if retcode == 0:
-                        device["product"] = stdout.strip()
-                    else:
-                        device["product"] = "error"
-                    device["status"] = self.console.DEVICE_STATUS_DICT[
-                        "online"]
-                    devices.append(device)
+                    serial = device["serial"]
+
+                    if (self.console.device_status[serial] !=
+                            common._DEVICE_STATUS_DICT["use"]):
+                        stdout, _, retcode = cmd_utils.ExecuteOneShellCommand(
+                            "adb -s %s shell getprop ro.product.board" %
+                            device["serial"])
+                        if retcode == 0:
+                            device["product"] = stdout.strip()
+                        else:
+                            device["product"] = "error"
+
+                        self.console.device_status[
+                            serial] = common._DEVICE_STATUS_DICT["online"]
+
+                        device["status"] = self.console.device_status[serial]
+                        devices.append(device)
 
             stdout, stderr, returncode = cmd_utils.ExecuteOneShellCommand(
                 "fastboot devices")
@@ -80,20 +88,25 @@ class CommandDevice(base_command_processor.BaseCommandProcessor):
                 if len(line.strip()):
                     device = {}
                     device["serial"] = line.split()[0]
-                    _, stderr, retcode = cmd_utils.ExecuteOneShellCommand(
-                        "fastboot -s %s getvar product" % device["serial"])
-                    if retcode == 0:
-                        res = stderr.splitlines()[0].rstrip()
-                        print(res)
-                        if ":" in res:
-                            device["product"] = res.split(":")[1].strip()
+                    serial = device["serial"]
+
+                    if (self.console.device_status[serial] !=
+                            common._DEVICE_STATUS_DICT["use"]):
+                        _, stderr, retcode = cmd_utils.ExecuteOneShellCommand(
+                            "fastboot -s %s getvar product" % device["serial"])
+                        if retcode == 0:
+                            res = stderr.splitlines()[0].rstrip()
+                            if ":" in res:
+                                device["product"] = res.split(":")[1].strip()
+                            else:
+                                device["product"] = "error"
                         else:
                             device["product"] = "error"
-                    else:
-                        device["product"] = "error"
-                    device["status"] = self.console.DEVICE_STATUS_DICT[
-                        "fastboot"]
-                    devices.append(device)
+                        self.console.device_status[
+                            serial] = common._DEVICE_STATUS_DICT["fastboot"]
+
+                        device["status"] = self.console.device_status[serial]
+                        devices.append(device)
 
             self.console._vti_endpoint_client.UploadDeviceInfo(
                 host.hostname, devices)

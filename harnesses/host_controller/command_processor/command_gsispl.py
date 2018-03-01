@@ -19,6 +19,7 @@ import os
 import tempfile
 import zipfile
 
+from host_controller import common
 from host_controller.command_processor import base_command_processor
 from host_controller.utils.gsi import img_utils
 
@@ -107,7 +108,7 @@ class CommandGsispl(base_command_processor.BaseCommandProcessor):
             if "year" in version_dict and "month" in version_dict:
                 version = "{:04d}-{:02d}-{:02d}".format(
                     version_dict["year"], version_dict["month"],
-                    self.console._SPL_DEFAULT_DAY)
+                    common._SPL_DEFAULT_DAY)
             else:
                 print("Failed to fetch SPL version from %s file." % img_path)
                 return False

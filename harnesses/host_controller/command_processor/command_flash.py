@@ -18,6 +18,7 @@ import importlib
 import os
 import stat
 
+from host_controller import common
 from host_controller.build import build_flasher
 from host_controller.command_processor import base_command_processor
 
@@ -50,7 +51,7 @@ class CommandFlash(base_command_processor.BaseCommandProcessor):
             help="The partitions and images to be flashed. The format is "
             "<partition>=<image>. If PARTITION_IMAGE list is empty, "
             "currently fetched " + ", ".join(
-                self.console._DEFAULT_FLASH_IMAGES) + " will be flashed.")
+                common._DEFAULT_FLASH_IMAGES) + " will be flashed.")
         self.arg_parser.add_argument(
             "--serial", default="", help="Serial number for device.")
         self.arg_parser.add_argument(
@@ -133,7 +134,7 @@ class CommandFlash(base_command_processor.BaseCommandProcessor):
                 partition_image = dict(
                     (image.rsplit(".img", 1)[0],
                      self.console.device_image_info[image])
-                    for image in self.console._DEFAULT_FLASH_IMAGES
+                    for image in common._DEFAULT_FLASH_IMAGES
                     if image in self.console.device_image_info)
 
         # type
@@ -155,7 +156,8 @@ class CommandFlash(base_command_processor.BaseCommandProcessor):
             if args.flasher_type == "fastboot":
                 if args.image is not None:
                     ret_flash = flasher.FlashImage(partition_image, True
-                                       if args.reboot == "true" else False)
+                                                   if args.reboot == "true"
+                                                   else False)
                 elif args.current is not None:
                     ret_flash = flasher.Flash(partition_image)
                 else:
@@ -180,8 +182,9 @@ class CommandFlash(base_command_processor.BaseCommandProcessor):
                         "Please specify the path to custom flash tool.")
                     return False
             else:
-                ret_flash = flasher.Flash(partition_image, self.console.tools_info,
-                              *args.flasher_args)
+                ret_flash = flasher.Flash(partition_image,
+                                          self.console.tools_info,
+                                          *args.flasher_args)
             if ret_flash == False:
                 return False
 

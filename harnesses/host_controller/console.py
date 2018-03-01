@@ -27,6 +27,7 @@ import threading
 import time
 import urlparse
 
+from host_controller import common
 from host_controller.command_processor import command_build
 from host_controller.command_processor import command_config
 from host_controller.command_processor import command_copy
@@ -38,53 +39,16 @@ from host_controller.command_processor import command_gsispl
 from host_controller.command_processor import command_info
 from host_controller.command_processor import command_lease
 from host_controller.command_processor import command_list
+from host_controller.command_processor import command_retry
 from host_controller.command_processor import command_request
 from host_controller.command_processor import command_test
 from host_controller.command_processor import command_upload
-from host_controller.build import build_provider
 from host_controller.build import build_provider_ab
 from host_controller.build import build_provider_gcs
 from host_controller.build import build_provider_local_fs
 from host_controller.build import build_provider_pab
+from host_controller.utils.ipc import shared_dict
 from host_controller.vti_interface import vti_endpoint_client
-
-# The default Partner Android Build (PAB) public account.
-# To obtain access permission, please reach out to Android partner engineering
-# department of Google LLC.
-_DEFAULT_ACCOUNT_ID = '543365459'
-
-# The default Partner Android Build (PAB) internal account.
-_DEFAULT_ACCOUNT_ID_INTERNAL = '541462473'
-
-# The default value for "flash --current".
-_DEFAULT_FLASH_IMAGES = [
-    build_provider.FULL_ZIPFILE,
-    "bootloader.img",
-    "boot.img",
-    "cache.img",
-    "radio.img",
-    "system.img",
-    "userdata.img",
-    "vbmeta.img",
-    "vendor.img",
-]
-
-# The environment variable for default serial numbers.
-_ANDROID_SERIAL = "ANDROID_SERIAL"
-
-DEVICE_STATUS_DICT = {
-    "unknown": 0,
-    "fastboot": 1,
-    "online": 2,
-    "ready": 3,
-    "use": 4,
-    "error": 5}
-
-_SPL_DEFAULT_DAY = 5
-
-# Maximum number of leased jobs per host.
-_MAX_LEASED_JOBS = 14
-
 
 COMMAND_PROCESSORS = [
     command_build.CommandBuild,
@@ -98,6 +62,7 @@ COMMAND_PROCESSORS = [
     command_info.CommandInfo,
     command_lease.CommandLease,
     command_list.CommandList,
+    command_retry.CommandRetry,
     command_request.CommandRequest,
     command_test.CommandTest,
     command_upload.CommandUpload,
@@ -122,7 +87,7 @@ class NonDaemonizedPool(multiprocessing.pool.Pool):
     Process = NonDaemonizedProcess
 
 
-def JobMain(vti_address, pab, in_queue, out_queue):
+def JobMain(vti_address, pab, in_queue, out_queue, device_status):
     """Main() for a child process that executes a leased job.
 
     Currently, lease jobs must use VTI (not TFC).
@@ -132,7 +97,9 @@ def JobMain(vti_address, pab, in_queue, out_queue):
         pab: BuildProvider for Partner Android Build and needed
              to create Console.
         in_queue: Queue to get new jobs.
-        out_queue; Queue to put execution results.
+        out_queue: Queue to put execution results.
+        device_status: SharedDict, contains device status information.
+                       shared between processes.
     """
     if not vti_address:
         print("vti address is not set. example : $ run --vti=<url>")
@@ -141,6 +108,7 @@ def JobMain(vti_address, pab, in_queue, out_queue):
     vti_client = vti_endpoint_client.VtiEndpointClient(vti_address)
     console = Console(vti_client, None, build_provider_pab.BuildProviderPAB(),
                       None)
+    console.device_status = device_status
     while True:
         command = in_queue.get()
         if command == "exit":
@@ -151,6 +119,10 @@ def JobMain(vti_address, pab, in_queue, out_queue):
             if filepath is not None:
                 # TODO: redirect console output and add
                 # console command to access them.
+
+                for serial in kwargs["serial"]:
+                    console.device_status[serial] = common._DEVICE_STATUS_DICT[
+                        "use"]
                 print_to_console = True
                 if not print_to_console:
                     sys.stdout = out
@@ -172,6 +144,10 @@ def JobMain(vti_address, pab, in_queue, out_queue):
                 if not print_to_console:
                     sys.stdout = sys.__stdout__
                     sys.stderr = sys.__stderr__
+
+                for serial in kwargs["serial"]:
+                    console.device_status[serial] = common._DEVICE_STATUS_DICT[
+                        "ready"]
         else:
             print("Unknown job command %s" % command)
 
@@ -198,6 +174,8 @@ class Console(cmd.Cmd):
         _in_file: The input file object.
         _out_file: The output file object.
         _serials: A list of string where each string is a device serial.
+        _device_status: SharedDict, shared with process pool.
+                        contains status data on each devices.
     """
 
     def __init__(self,
@@ -231,14 +209,25 @@ class Console(cmd.Cmd):
         self.tools_info = {}
         self.fetch_info = {}
         self.test_results = {}
+        self._device_status = shared_dict.SharedDict()
 
-        if _ANDROID_SERIAL in os.environ:
-            self._serials = [os.environ[_ANDROID_SERIAL]]
+        if common._ANDROID_SERIAL in os.environ:
+            self._serials = [os.environ[common._ANDROID_SERIAL]]
         else:
             self._serials = []
 
         self.InitCommandModuleParsers()
         self.SetUpCommandProcessors()
+
+    @property
+    def device_status(self):
+        """getter for self._device_status"""
+        return self._device_status
+
+    @device_status.setter
+    def device_status(self, device_status):
+        """setter for self._device_status"""
+        self._device_status = device_status
 
     def InitCommandModuleParsers(self):
         """Init all console command modules"""
@@ -250,10 +239,6 @@ class Console(cmd.Cmd):
 
     def SetUpCommandProcessors(self):
         """Sets up all command processors."""
-        setattr(self, "_DEFAULT_ACCOUNT_ID", _DEFAULT_ACCOUNT_ID)
-        setattr(self, "_DEFAULT_FLASH_IMAGES", _DEFAULT_FLASH_IMAGES)
-        setattr(self, "DEVICE_STATUS_DICT", DEVICE_STATUS_DICT)
-        setattr(self, "_SPL_DEFAULT_DAY", _SPL_DEFAULT_DAY)
         for command_processor in COMMAND_PROCESSORS:
             cp = command_processor()
             cp._SetUp(self)
@@ -282,6 +267,7 @@ class Console(cmd.Cmd):
             KeyError if a variable is not found in the dictionaries or the
             value is empty.
         """
+
         def ReplaceVariable(match):
             name = match.group(1)
             if name in ("build_id", "branch", "target"):
@@ -473,11 +459,9 @@ class Console(cmd.Cmd):
         self._job_in_queue = multiprocessing.Queue()
         self._job_out_queue = multiprocessing.Queue()
         self._job_pool = NonDaemonizedPool(
-            _MAX_LEASED_JOBS, JobMain,
-            (self._vti_address,
-             self._build_provider["pab"],
-             self._job_in_queue,
-             self._job_out_queue))
+            common._MAX_LEASED_JOBS, JobMain,
+            (self._vti_address, self._build_provider["pab"],
+             self._job_in_queue, self._job_out_queue, self._device_status))
 
         self._job_thread = threading.Thread(target=self.JobThread)
         self._job_thread.daemon = True
@@ -506,7 +490,12 @@ class Console(cmd.Cmd):
                 ret_queue = multiprocessing.Queue()
                 for sub_command in line:
                     p = multiprocessing.Process(
-                        target=self.onecmd, args=(sub_command, depth + 1, ret_queue, ))
+                        target=self.onecmd,
+                        args=(
+                            sub_command,
+                            depth + 1,
+                            ret_queue,
+                        ))
                     jobs.append(p)
                     p.start()
                 for job in jobs:
@@ -521,7 +510,7 @@ class Console(cmd.Cmd):
             else:
                 for sub_command in line:
                     ret_cmd_list = self.onecmd(sub_command, depth + 1)
-                    if ret_cmd_list==False and ret_out_queue:
+                    if ret_cmd_list == False and ret_out_queue:
                         ret_out_queue.put(False)
                         return False
             return
@@ -529,7 +518,7 @@ class Console(cmd.Cmd):
         print("Command: %s" % line)
         try:
             ret_cmd = cmd.Cmd.onecmd(self, line)
-            if ret_cmd==False and ret_out_queue:
+            if ret_cmd == False and ret_out_queue:
                 ret_out_queue.put(ret_cmd)
             return ret_cmd
         except Exception as e:
