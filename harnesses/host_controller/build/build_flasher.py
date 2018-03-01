@@ -180,6 +180,34 @@ class BuildFlasher(object):
             self.device.log.info(self.device.fastboot.reboot())
         return True
 
+    def FlashImage(self, device_images, reboot=False):
+        """Flash specified image(s) to the device.
+
+        Args:
+            device_images: dict, where the key is partition name and value is
+                           image file path.
+            reboot: boolean, true to reboot the device.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not device_images:
+            logging.warn("Flash skipped because no device image is given.")
+            return False
+
+        if not self.device.isBootloaderMode:
+            self.device.adb.wait_for_device()
+            self.device.log.info(self.device.adb.reboot_bootloader())
+
+        for partition, image_path in device_images.iteritems():
+            if partition.endswith(".img"):
+                partition = partition[:-4]
+            self.device.log.info(
+                self.device.fastboot.flash(partition, image_path))
+        if reboot:
+            self.device.log.info(self.device.fastboot.reboot())
+        return True
+
     def WaitForDevice(self, timeout_secs=600):
         """Waits for the device to boot completely.
 
