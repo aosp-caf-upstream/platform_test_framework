@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e
 
 function unmount() {
   echo "Unmounting..."
@@ -17,24 +16,37 @@ case $# in
     ;;
   *)
     echo "Usage: $SCRIPT_NAME <system.img> (<output_system.img> <new_version_id> (<input_file_contexts.bin>))"
-    exit
+    exit 1
     ;;
 esac
 
 if (("$#" >= 3)) && ((${#NEW_VERSION} != 10)); then
   echo "length of <new_version_id>  must be 10"
-  exit
+  exit 1
 fi
 
-BIN_PATH="${PWD}/../../host/bin"
-if [ ! -d "${BIN_PATH}" ]; then
-  # probably running from aosp root
-  if [ -d "${ANDROID_HOST_OUT}" ]; then
-    BIN_PATH="${ANDROID_HOST_OUT}/bin"
-  else
-    echo "Need lunch"
-    exit 1
+# First, check whether environment is set by lunch.
+if [ -d "${ANDROID_HOST_OUT}" ]; then
+  BIN_PATH="${ANDROID_HOST_OUT}/bin"
+fi
+
+# If BIN_PATH is not a directory, or cannot find simg2img binary then
+# try to get bin path from the current location.
+if [ ! -d "${BIN_PATH}" ] || [ ! -f "${BIN_PATH}/simg2img" ]; then
+  BASE="${PWD##*/}"
+  if [ "${BASE}" == "testcases" ]; then
+    # If shell is executed through 'run', its base path is "testcases"
+    BIN_PATH="${PWD}/host/bin"
+  elif [ "${BASE}" == "gsi" ]; then
+    # If current path is "gsi" then we assume current path is
+    # testcases/host_controller/gsi
+    BIN_PATH="${PWD}/../../host/bin"
   fi
+fi
+
+if [ ! -d "${BIN_PATH}" ] || [ ! -f "${BIN_PATH}/simg2img" ]; then
+  echo "Cannot find the required binaries. Need lunch; or run in a correct path"
+  exit 1
 fi
 
 UNSPARSED_SYSTEM_IMG="${SYSTEM_IMG}.raw"
