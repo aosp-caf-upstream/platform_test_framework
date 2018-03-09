@@ -73,16 +73,22 @@ def EmitConsoleCommands(**kwargs):
         "--build_id=%s --account_id=%s" % (manifest_branch, build_target,
                                            build_id, pab_account_id))
 
-    if "gsi_build_id" in kwargs and kwargs["gsi_build_id"]:
-        gsi_build_id = kwargs["gsi_build_id"]
+    if "gsi_branch" in kwargs and kwargs["gsi_branch"]:
+        gsi = True
     else:
-        gsi_build_id = "latest"
-    result.append(
-        "fetch --type=pab --branch=%s --target=%s "
-        "--artifact_name=aosp_arm64_ab-img-{build_id}.zip --build_id=%s" %
-        (kwargs["gsi_branch"], kwargs["gsi_build_target"], gsi_build_id))
-    if "gsi_pab_account_id" in kwargs and kwargs["gsi_pab_account_id"] != "":
-        result[-1] += " --account_id=%s" % kwargs["gsi_pab_account_id"]
+        gsi = False
+
+    if gsi:
+        if "gsi_build_id" in kwargs and kwargs["gsi_build_id"]:
+            gsi_build_id = kwargs["gsi_build_id"]
+        else:
+            gsi_build_id = "latest"
+        result.append(
+            "fetch --type=pab --branch=%s --target=%s "
+            "--artifact_name=aosp_arm64_ab-img-{build_id}.zip --build_id=%s" %
+            (kwargs["gsi_branch"], kwargs["gsi_build_target"], gsi_build_id))
+        if "gsi_pab_account_id" in kwargs and kwargs["gsi_pab_account_id"] != "":
+            result[-1] += " --account_id=%s" % kwargs["gsi_pab_account_id"]
 
     if "test_build_id" in kwargs and kwargs["test_build_id"]:
         test_build_id = kwargs["test_build_id"]
@@ -96,16 +102,21 @@ def EmitConsoleCommands(**kwargs):
         result[-1] += " --account_id=%s" % kwargs["test_pab_account_id"]
 
     result.append("info")
-    result.append("gsispl --version_from_path=boot.img")
-    result.append("info")
+    if gsi:
+        result.append("gsispl --version_from_path=boot.img")
+        result.append("info")
 
     shards = int(kwargs["shards"])
     test_name = kwargs["test_name"].split("/")[-1]
     serials = kwargs["serial"]
+    param = ""
+    if "param" in kwargs and kwargs["param"]:
+        param = " ".join(kwargs["param"])
+
     if shards > 1:
         sub_commands = []
-        test_command = "test --keep-result -- %s --shards %d" % (test_name,
-                                                                 shards)
+        test_command = "test --keep-result -- %s --shards %d %s" % (
+            test_name, shards, param)
         if shards <= len(serials):
             for shard_index in range(shards):
                 new_cmd_list = []
@@ -118,11 +129,11 @@ def EmitConsoleCommands(**kwargs):
     else:
         result.append("flash --current --serial %s" % serials[0])
         if serials:
-            result.append("test --keep-result -- %s --serial %s --shards %s" %
-                          (test_name, ",".join(serials), shards))
+            result.append("test --keep-result -- %s --serial %s --shards %s %s" %
+                          (test_name, ",".join(serials), shards, param))
         else:
-            result.append("test --keep-result -- %s --shards %s" % (test_name,
-                                                                    shards))
+            result.append("test --keep-result -- %s --shards %s %s" % (
+                test_name, shards, param))
 
     if "retry_count" in kwargs:
         retry_count = int(kwargs["retry_count"])
