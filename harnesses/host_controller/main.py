@@ -185,7 +185,9 @@ def main():
         while True:
             sys.stdin.readline()
     else:
-        main_console = console.Console(vti_endpoint, tfc, pab, hosts)
+        main_console = console.Console(vti_endpoint, tfc, pab, hosts,
+                                       vti_address=args.vti)
+        main_console.StartJobThreadAndProcessPool()
         try:
             if args.serial:
                 main_console.SetSerials(args.serial.split(","))

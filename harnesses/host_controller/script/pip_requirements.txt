@@ -5,7 +5,7 @@ futures
 google-api-python-client
 google-cloud-pubsub
 httplib2
-multiprocess
+multiprocessing
 protobuf
 requests
 selenium

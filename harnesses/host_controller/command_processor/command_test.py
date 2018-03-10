@@ -47,7 +47,8 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
         """Initializes the parser for test command."""
         self._result_dir = None
         self.arg_parser.add_argument(
-            "--serial", "-s",
+            "--serial",
+            "-s",
             default=None,
             help="The target device serial to run the command. "
             "A comma-separate list.")
@@ -108,6 +109,7 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
         Args:
             cmd: a list of strings, the command to execute.
         """
+
         def LogOutputStream(log_level, stream):
             try:
                 while True:
@@ -119,7 +121,9 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
                 stream.close()
 
         proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE)
 
         out_thread = threading.Thread(
@@ -146,11 +150,12 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
             A dict containing the attributes loaded from the report.
         """
         result = {}
-        for event, elem in ElementTree.iterparse(report_file, ("start",)):
+        for event, elem in ElementTree.iterparse(report_file, ("start", )):
             if elem.tag == "Result":
-                result = {key: elem.attrib[key] for
-                          key in self._RESULT_ATTRIBUTES if
-                          key in elem.attrib}
+                result = {
+                    key: elem.attrib[key]
+                    for key in self._RESULT_ATTRIBUTES if key in elem.attrib
+                }
                 if len(result) != len(self._RESULT_ATTRIBUTES):
                     logging.warning("Incomplete <Result>: %s", elem.attrib)
                 break
@@ -187,9 +192,8 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
             else:
                 result_dir = None
 
-            cmd = self._GenerateVtsCommand(
-                self.console.test_suite_info["vts"], args.command,
-                serials, result_dir)
+            cmd = self._GenerateVtsCommand(self.console.test_suite_info["vts"],
+                                           args.command, serials, result_dir)
 
             print("Command: %s" % cmd)
             self._ExecuteCommand(cmd)
@@ -199,10 +203,12 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
                     os.path.join(dir_name, file_name) for
                     dir_name, file_name in utils.iterate_files(result_dir) if
                     file_name.startswith("log-result") and
-                    file_name.endswith(".zip")]
+                    file_name.endswith(".zip")
+                ]
+
                 if len(result_paths) != 1:
-                    logging.warning(
-                        "Unexpected number of results: %s", result_paths)
+                    logging.warning("Unexpected number of results: %s",
+                                    result_paths)
 
                 self.console.test_result.clear()
                 if len(result_paths) > 0:
@@ -212,10 +218,18 @@ class CommandTest(base_command_processor.BaseCommandProcessor):
                                 "log-result.xml", mode="rU") as result_xml:
                             result = self._LoadReport(result_xml)
                     result["result_zip"] = result_paths[0]
-                    logging.debug(result)
-                    self.console.test_result.update(result)
+
+                result_paths_full = [
+                    os.path.join(dir_name, file_name) for
+                    dir_name, file_name in utils.iterate_files(result_dir) if
+                    file_name.endswith(".zip")]
+                result["result_full"] = " ".join(result_paths_full)
+
+                logging.debug(result)
+                self.console.test_result.update(result)
         else:
             print("unsupported exec mode: %s", args.test_exec_mode)
+            return False
 
     # @Override
     def TearDown(self):

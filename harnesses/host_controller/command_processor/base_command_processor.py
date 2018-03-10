@@ -53,7 +53,16 @@ class BaseCommandProcessor(object):
         Args:
             arg_line: string, line of command arguments
         '''
-        self.Run(arg_line)
+        ret = self.Run(arg_line)
+
+        if ret is not None:
+            if ret == True:  # exit command executed.
+                return True
+            elif ret == False:
+                return False
+            else:
+                logging.warning("{} coommand returned {}".format(
+                    self.command, ret))
 
     def Run(self, arg_line):
         '''Run method to perform action when invoked from console.
