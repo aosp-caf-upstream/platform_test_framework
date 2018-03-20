@@ -21,6 +21,7 @@ import multiprocessing
 import multiprocessing.pool
 import os
 import re
+import signal
 import socket
 import sys
 import threading
@@ -87,15 +88,13 @@ class NonDaemonizedPool(multiprocessing.pool.Pool):
     Process = NonDaemonizedProcess
 
 
-def JobMain(vti_address, pab, in_queue, out_queue, device_status):
+def JobMain(vti_address, in_queue, out_queue, device_status):
     """Main() for a child process that executes a leased job.
 
     Currently, lease jobs must use VTI (not TFC).
 
     Args:
         vti_client: VtiEndpointClient needed to create Console.
-        pab: BuildProvider for Partner Android Build and needed
-             to create Console.
         in_queue: Queue to get new jobs.
         out_queue: Queue to put execution results.
         device_status: SharedDict, contains device status information.
@@ -105,10 +104,25 @@ def JobMain(vti_address, pab, in_queue, out_queue, device_status):
         print("vti address is not set. example : $ run --vti=<url>")
         return
 
+    def SigTermHandler(signum, frame):
+        """Signal handler for exiting pool process explicitly.
+
+        Added to resolve orphaned pool process issue.
+        """
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, SigTermHandler)
+
     vti_client = vti_endpoint_client.VtiEndpointClient(vti_address)
-    console = Console(vti_client, None, build_provider_pab.BuildProviderPAB(),
-                      None)
+    console = Console(
+        vti_client,
+        None,
+        build_provider_pab.BuildProviderPAB(),
+        None,
+        job_pool=True)
     console.device_status = device_status
+    multiprocessing.util.Finalize(console, console.__exit__, exitpriority=0)
+
     while True:
         command = in_queue.get()
         if command == "exit":
@@ -130,8 +144,7 @@ def JobMain(vti_address, pab, in_queue, out_queue, device_status):
 
                 ret = console.ProcessConfigurableScript(
                     os.path.join(os.getcwd(), "host_controller", "campaigns",
-                                 filepath),
-                    **kwargs)
+                                 filepath), **kwargs)
                 if ret:
                     job_status = "complete"
                 else:
@@ -176,6 +189,8 @@ class Console(cmd.Cmd):
         _serials: A list of string where each string is a device serial.
         _device_status: SharedDict, shared with process pool.
                         contains status data on each devices.
+        _job_pool: bool, True if Console is created from job pool process
+                   context.
     """
 
     def __init__(self,
@@ -185,16 +200,19 @@ class Console(cmd.Cmd):
                  host_controllers,
                  vti_address=None,
                  in_file=sys.stdin,
-                 out_file=sys.stdout):
+                 out_file=sys.stdout,
+                 job_pool=False):
         """Initializes the attributes and the parsers."""
         # cmd.Cmd is old-style class.
         cmd.Cmd.__init__(self, stdin=in_file, stdout=out_file)
         self._build_provider = {}
         self._build_provider["pab"] = pab
-        self._build_provider[
-            "local_fs"] = build_provider_local_fs.BuildProviderLocalFS()
-        self._build_provider["gcs"] = build_provider_gcs.BuildProviderGCS()
-        self._build_provider["ab"] = build_provider_ab.BuildProviderAB()
+        self._job_pool = job_pool
+        if not self._job_pool:
+            self._build_provider[
+                "local_fs"] = build_provider_local_fs.BuildProviderLocalFS()
+            self._build_provider["gcs"] = build_provider_gcs.BuildProviderGCS()
+            self._build_provider["ab"] = build_provider_ab.BuildProviderAB()
         self._vti_endpoint_client = vti_endpoint_client
         self._vti_address = vti_address
         self._tfc_client = tfc
@@ -218,6 +236,11 @@ class Console(cmd.Cmd):
 
         self.InitCommandModuleParsers()
         self.SetUpCommandProcessors()
+
+    def __exit__(self):
+        """Finalizes the build provider attributes explicitly when exited."""
+        for bp in self._build_provider:
+            self._build_provider[bp].__del__()
 
     @property
     def device_status(self):
@@ -450,9 +473,11 @@ class Console(cmd.Cmd):
         thread = threading.currentThread()
         while getattr(thread, "keep_running", True):
             time.sleep(1)
+
         if self._job_pool:
+            self._job_pool.close()
             self._job_pool.terminate()
-            self._job_pool = None
+            self._job_pool.join()
 
     def StartJobThreadAndProcessPool(self):
         """Starts a background thread to control leased jobs."""
@@ -460,8 +485,8 @@ class Console(cmd.Cmd):
         self._job_out_queue = multiprocessing.Queue()
         self._job_pool = NonDaemonizedPool(
             common._MAX_LEASED_JOBS, JobMain,
-            (self._vti_address, self._build_provider["pab"],
-             self._job_in_queue, self._job_out_queue, self._device_status))
+            (self._vti_address, self._job_in_queue, self._job_out_queue,
+             self._device_status))
 
         self._job_thread = threading.Thread(target=self.JobThread)
         self._job_thread.daemon = True
@@ -471,6 +496,7 @@ class Console(cmd.Cmd):
         """Terminates the thread and processes that runs the leased job."""
         if hasattr(self, "_job_thread"):
             self._job_thread.keep_running = False
+            self._job_thread.join()
 
     # @Override
     def onecmd(self, line, depth=1, ret_out_queue=None):
