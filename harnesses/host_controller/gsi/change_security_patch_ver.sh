@@ -121,15 +121,22 @@ if [ ! -d "${BIN_PATH}" ] || [ ! -f "${BIN_PATH}/simg2img" ]; then
   exit 1
 fi
 
-UNSPARSED_SYSTEM_IMG="${SYSTEM_IMG}.raw"
 MOUNT_POINT="${PWD}/temp_mnt"
 SPL_PROPERTY_NAME="ro.build.version.security_patch"
 RELEASE_VERSION_PROPERTY_NAME="ro.build.version.release"
 VNDK_VERSION_PROPERTY="ro.vndk.version"
 VNDK_VERSION_PROPERTY_OMR1="${VNDK_VERSION_PROPERTY}=27"
 
-echo "Unsparsing ${SYSTEM_IMG}..."
-$BIN_PATH/simg2img "$SYSTEM_IMG" "$UNSPARSED_SYSTEM_IMG"
+UNSPARSED_SYSTEM_IMG="${SYSTEM_IMG}.raw"
+SYSTEM_IMG_MAGIC="$(xxd -g 4 -l 4 "$SYSTEM_IMG" | head -n1 | awk '{print $2}')"
+if [ "$SYSTEM_IMG_MAGIC" = "3aff26ed" ]; then
+  echo "Unsparsing ${SYSTEM_IMG}..."
+  $BIN_PATH/simg2img "$SYSTEM_IMG" "$UNSPARSED_SYSTEM_IMG"
+else
+  echo "Copying unsparse input system image ${SYSTEM_IMG}..."
+  cp "$SYSTEM_IMG" "$UNSPARSED_SYSTEM_IMG"
+fi
+
 IMG_SIZE=$(stat -c%s "$UNSPARSED_SYSTEM_IMG")
 
 echo "Mounting..."
